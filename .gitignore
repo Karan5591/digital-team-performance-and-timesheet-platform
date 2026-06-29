@@ -10,4 +10,5 @@ coverage/
 # Project specific
 uploads/
 prisma/migrations/
-
+data/db.json
+src/dbSeedData.ts
