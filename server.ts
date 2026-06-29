@@ -26,7 +26,7 @@ import {
 
 const app = express();
 const PORT = 3000;
-const taskLibraryPath = path.join(process.cwd(), 'data', 'db.json');
+const taskLibraryPath = path.join(process.cwd(), 'data', 'taskLibrary.json');
 let taskLibrary: TaskLibraryItem[] = [];
 const ROLE_CACHE = new Map<string, string>();
 
@@ -185,7 +185,7 @@ async function loadTaskLibrary() {
   try {
     const raw = await fs.readFile(taskLibraryPath, 'utf-8');
     const parsed = JSON.parse(raw);
-    taskLibrary = Array.isArray(parsed.taskLibrary) ? parsed.taskLibrary : [];
+    taskLibrary = Array.isArray(parsed) ? parsed : (parsed.taskLibrary || []);
   } catch (error) {
     console.warn(`Unable to load task library from ${taskLibraryPath}:`, error);
     taskLibrary = [];
@@ -692,14 +692,20 @@ app.post('/api/tasks/entry', authenticateToken, async (req, res) => {
       }
     });
   } else {
-    if (sheet.status !== 'DRAFT' && sheet.status !== 'REJECTED') {
-      res.status(400).json({ error: 'Timesheet for this day is already submitted/approved' });
+    if (sheet.status === 'APPROVED') {
+      res.status(400).json({ error: 'Timesheet for this day is already approved and locked' });
       return;
     }
+    // If submitted, reset back to DRAFT so new task can be added
     const dayTasks = await prisma.taskEntry.findMany({ where: { userId: user.id, date: new Date(targetDate) } }) as Array<{ durationMinutes: number }>;
+    const newTotal = dayTasks.reduce((sum, t) => sum + t.durationMinutes, 0) + Number(duration_min);
     sheet = await prisma.timesheetDay.update({
       where: { id: sheet.id },
-      data: { totalLoggedMinutes: dayTasks.reduce((sum, t) => sum + t.durationMinutes, 0) }
+      data: {
+        totalLoggedMinutes: newTotal,
+        status: 'DRAFT',
+        submittedAt: null
+      }
     });
   }
 
@@ -888,6 +894,26 @@ async function changeTimesheetStatus(sheetId: string, action: 'approve' | 'rejec
   if (!sheet) return null;
 
   const newStatus = action === 'approve' ? 'APPROVED' : 'REJECTED';
+
+  // Delete uploaded attachments for all tasks on this sheet date
+  const tasks = await prisma.taskEntry.findMany({
+    where: { userId: sheet.userId, date: sheet.date, submitted: true }
+  });
+
+  for (const task of tasks) {
+    if (task.outputUrl && task.outputUrl.startsWith('/uploads/')) {
+      const filePath = path.join(process.cwd(), task.outputUrl);
+      try {
+        await fs.unlink(filePath);
+      } catch {
+        // File may already be deleted — ignore
+      }
+      await prisma.taskEntry.update({
+        where: { id: task.id },
+        data: { outputUrl: null }
+      });
+    }
+  }
 
   const updated = await prisma.timesheetDay.update({
     where: { id: sheetId },

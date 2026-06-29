@@ -379,3 +379,20 @@ model IncentivePool {
 
   updatedAt           DateTime @updatedAt
 }
+
+model TaskLibrary {
+
+  id                  String   @id @default(uuid())
+
+  role                String
+
+  category            String
+
+  task                String
+
+  linkedKpiMetricName String?
+
+  createdAt           DateTime @default(now())
+
+  updatedAt           DateTime @updatedAt
+}

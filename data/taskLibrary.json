@@ -1,0 +1,283 @@
+[
+  {
+    "id": "lib_seo_mgr",
+    "role": "SEO Manager",
+    "task_name": "SEO Manager Tasks",
+    "subtasks": [
+      "Keyword research & mapping",
+      "On-page metadata & H-tags optimization",
+      "Technical SEO audit (Sitemap, robots, crawl errors)",
+      "Spam/toxic backlink cleanup",
+      "Google Business Profile (GMB) optimization",
+      "Local pack tracking & optimization",
+      "Organic traffic & GSC/GA4 analysis",
+      "Monthly SEO progress report compile"
+    ],
+    "category": "General"
+  },
+  {
+    "id": "lib_seo_exec",
+    "role": "SEO Executive",
+    "task_name": "SEO Executive Tasks",
+    "subtasks": [
+      "Page submission (Google Search Console)",
+      "Directory listing & GMB verification",
+      "GMB post publication",
+      "Local citation building",
+      "Meta title / Description update",
+      "Schema markup implementation",
+      "Broken links fix & redirect mapping",
+      "Internal linking & content mapping",
+      "Backlink generation (High DA submissions)",
+      "Weekly submission & ranking report"
+    ],
+    "category": "General"
+  },
+  {
+    "id": "lib_content_mgr",
+    "role": "Content Manager",
+    "task_name": "Content Manager Tasks",
+    "subtasks": [
+      "Blog draft writing (GT/HH/ACR)",
+      "CMS uploading & publishing",
+      "Content calendar planning",
+      "WhatsApp campaign copy & layout design",
+      "TKM T3DR billing submissions",
+      "HH claim processing review",
+      "Content optimization for SEO keywords"
+    ],
+    "category": "General"
+  },
+  {
+    "id": "lib_designer",
+    "role": "Sr. Graphic Designer",
+    "task_name": "Graphic Design Tasks",
+    "subtasks": [
+      "Campaign master creative design",
+      "Creative resizing & adaptation",
+      "Client/Admin revision cycle",
+      "Brand asset collection & guidelines",
+      "Social media post creative",
+      "Multi-brand coverage (GT/HH/ACR)"
+    ],
+    "category": "General"
+  },
+  {
+    "id": "lib_video_ai",
+    "role": "AI Video Maker / Editor",
+    "task_name": "AI Video & Editing Tasks",
+    "subtasks": [
+      "AI video generation & prompt engineering",
+      "AI digital avatar host video setup",
+      "Reels / Shorts video editing & subtitle burnt",
+      "On-site video shoot session planning",
+      "Photoshoot session & post-process editing",
+      "Sound design & background score mix"
+    ],
+    "category": "General"
+  },
+  {
+    "id": "lib_video_presenter",
+    "role": "Video Presenter",
+    "task_name": "Video Presenter Tasks",
+    "subtasks": [
+      "On-camera present sessions",
+      "Concept outline & scripting",
+      "Brand promotion coverage (GT/HH/ACR)",
+      "User engagement & feedback review",
+      "Video upload check & live quality review"
+    ],
+    "category": "General"
+  },
+  {
+    "id": "lib_social_media",
+    "role": "Social Media Manager",
+    "task_name": "Social Media Management Tasks",
+    "subtasks": [
+      "Instagram post & story upload",
+      "Facebook page updates & boosting",
+      "YouTube long & short upload (with description & tags)",
+      "LinkedIn corporate update publish",
+      "X (Twitter) brand communication",
+      "Locobuzz ORM responses & escalations",
+      "Localo GMB tracking & review reply"
+    ],
+    "category": "General"
+  },
+  {
+    "id": "lib_ppc_exec",
+    "role": "PPC Executive",
+    "task_name": "PPC Execution Tasks",
+    "subtasks": [
+      "Google/FB Campaign optimization",
+      "New ad group launch & budget update",
+      "Lead quality audits & score profiling",
+      "Same-day portal delivery check",
+      "Ad copy/scheme verification",
+      "Conversion tracking tag & pixel health check"
+    ],
+    "category": "General"
+  },
+  {
+    "id": "lib_ppc_mgr",
+    "role": "PPC Manager",
+    "task_name": "PPC Management Tasks",
+    "subtasks": [
+      "Media plan planning & budget drafting",
+      "Core campaign strategy review",
+      "Budget utilization & lead CPA review",
+      "SPOC lead-to-booking funnel tracking",
+      "Weekly brand performance report compilation"
+    ],
+    "category": "General"
+  },
+  {
+    "id": "lib_srdmm",
+    "role": "Sr. Digital Marketing Manager",
+    "task_name": "Sr. Digital Marketing Management Tasks",
+    "subtasks": [
+      "Weekly team KPI review & tracking",
+      "Monthly media budget planning (GT focus)",
+      "General Manager & location coordination meeting",
+      "Team mentoring & skill transfer session",
+      "Calendar adherence check"
+    ],
+    "category": "General"
+  },
+  {
+    "id": "lib_dmm",
+    "role": "Digital Marketing Manager",
+    "task_name": "Digital Marketing Management Tasks",
+    "subtasks": [
+      "Monthly lead targets alignment (ACR focus)",
+      "Lead funnel analysis (Lead->Enquiry->Booking)",
+      "Quality assurance & junk lead check",
+      "Location-wise CPL verification",
+      "Campaign copy check & error log"
+    ],
+    "category": "General"
+  },
+  {
+    "id": "lib_crm_tech",
+    "role": "CRM Tech Manager",
+    "task_name": "CRM Technical Tasks",
+    "subtasks": [
+      "Bitrix24 workflow mapping & field config",
+      "API integration health check",
+      "Lead routing & vendor connection review",
+      "AI voice calling campaign setup & analytics",
+      "Team training on CRM fields & updates"
+    ],
+    "category": "General"
+  },
+  {
+    "id": "lib_crm_ops",
+    "role": "CRM Ops / IVR",
+    "task_name": "CRM Operations & IVR Tasks",
+    "subtasks": [
+      "Mcube incoming call log auditing",
+      "CloudConnect outgoing call analysis",
+      "IVR number configuration & testing",
+      "Vendor invoice processing",
+      "PO creation & release",
+      "Software recurring subscription tracking",
+      "Vendor bill master sheet update"
+    ],
+    "category": "General"
+  },
+  {
+    "id": "lib_tech_mgr",
+    "role": "Technology Manager",
+    "task_name": "Technology Management Tasks",
+    "subtasks": [
+      "Zoho Books config & custom module creation",
+      "Transactions posting check & logs analysis",
+      "Bank/Vendor reconciliation config",
+      "Zoho Procurement mapping",
+      "PO workflow management",
+      "Vendor master directory audit",
+      "User adoption & training checks"
+    ],
+    "category": "General"
+  },
+  {
+    "id": "lib_automation",
+    "role": "Automation & AI Engineer",
+    "task_name": "Automation & Chatbot Tasks",
+    "subtasks": [
+      "Chatbot deployment & logs check (GT/HH/ACR)",
+      "WhatsApp API campaign trigger",
+      "Flow build in chatbot panel",
+      "Language-accuracy QA checks on LLM replies",
+      "Lead-capture routing verification",
+      "Chatbot SLA tracking"
+    ],
+    "category": "General"
+  },
+  {
+    "id": "lib_ai_intern",
+    "role": "AI Engineer Intern",
+    "task_name": "AI Engineer Intern Tasks",
+    "subtasks": [
+      "Automated dashboard reports compilation",
+      "Claude API workflows monitoring",
+      "AI call transcription auditing",
+      "AI script writing & validation check",
+      "Custom tool integrations validation"
+    ],
+    "category": "General"
+  },
+  {
+    "id": "lib_web_acr",
+    "role": "Web Dev - ACR/Portals",
+    "task_name": "ACR & Agent Portal Web Tasks",
+    "subtasks": [
+      "ACR payment gateway success rate monitoring",
+      "ACR customer site speed & security update",
+      "Agent portal updates & bug fix",
+      "AuctionMart staging testing & release",
+      "Payment gateway API endpoint update",
+      "SSL certificate & server resource check"
+    ],
+    "category": "General"
+  },
+  {
+    "id": "lib_web_gt_hh",
+    "role": "Web Dev - GT/HH",
+    "task_name": "GT & HH Web Tasks",
+    "subtasks": [
+      " hanshyundai.com / galaxytoyota.in speed audits",
+      "Promo landing pages upload & testing",
+      "Blog posting & image WebP optimization",
+      "Tech SEO tags check & redirection",
+      "Core Web Vitals load-speed optimizations",
+      "SSL verification & emergency server checks"
+    ],
+    "category": "General"
+  },
+  {
+    "id": "lib_used_car",
+    "role": "Used Car Ops",
+    "task_name": "Used Car Operations Tasks",
+    "subtasks": [
+      "Lead closure audit & CRM flags verification",
+      "Hpromise & UTrust listings published check",
+      "Website inventory count audit",
+      "Listing accuracy & vehicle photography review",
+      "Zoho Inventory stock aging tracking"
+    ],
+    "category": "General"
+  },
+  {
+    "id": "lib_intern",
+    "role": "Intern",
+    "task_name": "Intern Tasks",
+    "subtasks": [
+      "Ad-hoc data entry & sheet mapping",
+      "Assigned learning course module study",
+      "Supporting team SPOCs in data pulling",
+      "GMB post proofreading help"
+    ],
+    "category": "General"
+  }
+]
