@@ -1,0 +1,6 @@
+{
+  "name": "Digital Team Performance & Timesheet Platform",
+  "description": "A comprehensive daily activity log, attendance clock, monthly KPI scoring, and team utilization platform designed for centralized digital marketing and tech teams.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

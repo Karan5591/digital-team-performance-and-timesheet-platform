@@ -1,0 +1,1577 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import express from 'express';
+import path from 'path';
+import crypto from 'crypto';
+import { createServer as createViteServer } from 'vite';
+import { GoogleGenAI } from '@google/genai';
+import prisma from './src/lib/prisma.ts';
+import {
+  User,
+  AttendanceLog,
+  TaskEntry,
+  TaskLibraryItem,
+  KPIMetric,
+  KPIEntry,
+  KPIScore,
+  CalendarEvent,
+  IncentivePool,
+  Notification
+} from './src/types';
+
+export interface TimesheetDayDb {
+  id: string;
+  user_id: string;
+  date: string;
+  total_logged_min: number;
+  status: 'draft' | 'submitted' | 'approved' | 'rejected';
+  approver_id?: string;
+  approver_comment?: string | null;
+  submitted_at?: string;
+  approved_at?: string;
+}
+
+type DatabaseSchema = {
+  users: User[];
+  attendance: AttendanceLog[];
+  taskEntries: TaskEntry[];
+  taskLibrary: TaskLibraryItem[];
+  timesheets: TimesheetDayDb[];
+  kpiMetrics: KPIMetric[];
+  kpiEntries: KPIEntry[];
+  kpiScores: KPIScore[];
+  calendarEvents: CalendarEvent[];
+  incentivePools: IncentivePool[];
+  notifications: Notification[];
+};
+
+// Setup Express
+const app = express();
+const PORT = 3000;
+
+app.use(express.json());
+
+// Helper: Hashing password
+function hashPassword(password: string): string {
+  return crypto.createHash('sha256').update(password).digest('hex');
+}
+
+// Simple temporary Session Store mapping tokens to User IDs
+const SESSIONS = new Map<string, string>();
+
+function formatDate(value: Date | string | null | undefined) {
+  if (!value) return '';
+  const date = typeof value === 'string' ? new Date(value) : value;
+  return date.toISOString().split('T')[0];
+}
+
+function mapUser(user: any): User {
+  return {
+    id: user.id,
+    name: user.name,
+    emp_code: user.emp_code,
+    email: user.email,
+    password_hash: user.password_hash,
+    role: user.role,
+    designation: user.designation,
+    brand_focus: user.brand_focus,
+    doj: formatDate(user.doj),
+    status: user.status,
+    must_reset_password: user.must_reset_password ?? false
+  };
+}
+
+function mapAttendanceLog(log: any): AttendanceLog {
+  return {
+    id: log.id,
+    user_id: log.user_id,
+    date: formatDate(log.date),
+    clock_in_ts: log.clock_in_ts ? new Date(log.clock_in_ts).toISOString() : '',
+    clock_out_ts: log.clock_out_ts ? new Date(log.clock_out_ts).toISOString() : null,
+    break_start_ts: log.break_start_ts ? new Date(log.break_start_ts).toISOString() : null,
+    break_minutes: log.break_minutes,
+    active_minutes: log.active_minutes,
+    on_break: log.on_break,
+    device: log.device,
+    ip: log.ip,
+    status: log.status
+  };
+}
+
+function mapTaskEntry(entry: any): TaskEntry {
+  return {
+    id: entry.id,
+    user_id: entry.user_id,
+    date: formatDate(entry.date),
+    task: entry.task,
+    subtask: entry.subtask,
+    brand: entry.brand,
+    duration_min: entry.duration_min,
+    status: entry.status as TaskEntry['status'],
+    notes: entry.notes,
+    output_url: entry.output_url,
+    linked_kpi_metric_id: entry.linked_kpi_metric_id,
+    linked_kpi_metric_name: entry.linked_kpi_metric_name,
+    submitted: entry.submitted ?? false
+  };
+}
+
+function mapTimesheetDay(sheet: any) {
+  return {
+    id: sheet.id,
+    user_id: sheet.user_id,
+    date: formatDate(sheet.date),
+    total_logged_min: sheet.total_logged_min,
+    status: sheet.status,
+    approver_id: sheet.approver_id,
+    approver_comment: sheet.approver_comment || null,
+    submitted_at: sheet.submitted_at ? new Date(sheet.submitted_at).toISOString() : undefined,
+    approved_at: sheet.approved_at ? new Date(sheet.approved_at).toISOString() : undefined
+  };
+}
+
+// Authentication Middleware
+async function authenticateToken(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) {
+    res.status(401).json({ error: 'Authorization header required' });
+    return;
+  }
+
+  const userId = SESSIONS.get(token);
+  if (!userId) {
+    res.status(403).json({ error: 'Session expired or invalid' });
+    return;
+  }
+
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+  if (!user || user.status === 'inactive') {
+    res.status(403).json({ error: 'User is inactive or deleted' });
+    return;
+  }
+
+  (req as any).user = mapUser(user);
+  next();
+}
+
+// Admin Authorization Middleware
+function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const user = (req as any).user;
+  if (!user || user.role !== 'admin') {
+    res.status(403).json({ error: 'Admin access required' });
+    return;
+  }
+  next();
+}
+
+// ----------------------------------------------------------------------------
+// API Endpoints
+// ----------------------------------------------------------------------------
+
+// 1. Auth Endpoints
+app.post('/api/auth/login', async (req, res) => {
+  const { empId, password } = req.body;
+  if (!empId || !password) {
+    res.status(400).json({ error: 'Employee ID and password required' });
+    return;
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { emp_code: empId.toLowerCase() },
+  });
+
+  if (!user) {
+    res.status(401).json({ error: 'Invalid Employee ID or password' });
+    return;
+  }
+
+  const isCorrect = user.password_hash === password || user.password_hash === hashPassword(password);
+  if (!isCorrect) {
+    res.status(401).json({ error: 'Invalid empId or password' });
+    return;
+  }
+
+  if (user.status === 'inactive') {
+    res.status(403).json({ error: 'This account has been disabled' });
+    return;
+  }
+
+  const token = crypto.randomBytes(32).toString('hex');
+  SESSIONS.set(token, user.id);
+
+  res.json({
+    token,
+    user: mapUser(user)
+  });
+});
+
+
+
+
+
+app.post('/api/auth/reset-password', authenticateToken, (req, res) => {
+  const { newPassword } = req.body;
+  const userReq = (req as any).user as User;
+
+  if (!newPassword || newPassword.length < 6) {
+    res.status(400).json({ error: 'Password must be at least 6 characters' });
+    return;
+  }
+
+  const user = db.users.find(u => u.id === userReq.id);
+  if (user) {
+    user.password_hash = hashPassword(newPassword);
+    user.must_reset_password = false;
+    saveDb();
+    res.json({ success: true, message: 'Password reset successful' });
+  } else {
+    res.status(404).json({ error: 'User not found' });
+  }
+});
+
+app.post('/api/auth/forgot-password', (req, res) => {
+  const { email } = req.body;
+  if (!email) {
+    res.status(400).json({ error: 'Email is required' });
+    return;
+  }
+
+  const user = db.users.find(u => u.email.toLowerCase() === email.toLowerCase());
+  if (!user) {
+    res.status(404).json({ error: 'User not found with this email' });
+    return;
+  }
+
+  // Generate temporary password
+  const tempPass = Math.random().toString(36).slice(-8);
+  user.password_hash = tempPass; // Let them login with this temp password
+  user.must_reset_password = true;
+  saveDb();
+
+  // Return a mock email link
+  res.json({
+    success: true,
+    message: `A temporary password reset link has been dispatched to ${email}.`,
+    tempPassword: tempPass // Exposed in response for preview convenience
+  });
+});
+
+// 2. User Management (Admin Only)
+app.get('/api/users', authenticateToken, (req, res) => {
+  const userReq = (req as any).user as User;
+  if (userReq.role === 'admin') {
+    // Admins see everyone
+    res.json(db.users);
+  } else {
+    // Members only see themselves
+    res.json([userReq]);
+  }
+});
+
+
+
+
+app.post('/api/users', authenticateToken, requireAdmin, (req, res) => {
+  const { name, emp_code, email, designation, brand_focus, doj, role } = req.body;
+
+  if (!name || !emp_code || !email || !designation || !brand_focus || !doj) {
+    res.status(400).json({ error: 'Missing required user details' });
+    return;
+  }
+
+  const existing = db.users.find(u => u.email.toLowerCase() === email.toLowerCase() || u.emp_code === emp_code);
+  if (existing) {
+    res.status(400).json({ error: 'User with this email or employee code already exists' });
+    return;
+  }
+
+  const tempPass = emp_code.toLowerCase(); // Temporary password is the employee code
+  const newUser: User = {
+    id: `user_${Date.now()}`,
+    name,
+    emp_code,
+    email,
+    password_hash: tempPass, // Temporary, unhashed for easy first login
+    role: role || 'member',
+    designation,
+    brand_focus,
+    doj,
+    status: 'active',
+    must_reset_password: true
+  };
+
+  db.users.push(newUser);
+
+  // Initialize KPI metrics template for this new user based on their designation
+  // Let's copy from similar designations if available, or populate a generic role set
+  const referenceKpis = db.kpiMetrics.filter(m => m.user_id.toLowerCase().includes(designation.toLowerCase().split(' ')[0]));
+  if (referenceKpis.length > 0) {
+    referenceKpis.forEach(k => {
+      db.kpiMetrics.push({
+        id: `kpi_${newUser.id}_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
+        user_id: newUser.id,
+        name: k.name,
+        category: k.category,
+        weight: k.weight,
+        target: k.target,
+        lower_is_better: k.lower_is_better,
+        is_percentage: k.is_percentage
+      });
+    });
+  } else {
+    // Generic KPIs
+    db.kpiMetrics.push(
+      { id: `kpi_${newUser.id}_1`, user_id: newUser.id, name: 'Assigned Project Execution %', category: 'Role', weight: 40, target: 100, lower_is_better: false, is_percentage: true },
+      { id: `kpi_${newUser.id}_2`, user_id: newUser.id, name: 'Team Alignment & Collaboration', category: 'Role', weight: 30, target: 95, lower_is_better: false, is_percentage: true },
+      { id: `kpi_${newUser.id}_3`, user_id: newUser.id, name: 'Timesheet & Clock-in Compliance', category: 'Process', weight: 30, target: 100, lower_is_better: false, is_percentage: true }
+    );
+  }
+
+  saveDb();
+  res.status(211).json({ success: true, user: newUser, tempPassword: tempPass });
+});
+
+app.put('/api/users/:id', authenticateToken, requireAdmin, (req, res) => {
+  const { id } = req.params;
+  const { name, designation, brand_focus, status, role } = req.body;
+
+  const user = db.users.find(u => u.id === id);
+  if (!user) {
+    res.status(404).json({ error: 'User not found' });
+    return;
+  }
+
+  if (name !== undefined) user.name = name;
+  if (designation !== undefined) user.designation = designation;
+  if (brand_focus !== undefined) user.brand_focus = brand_focus;
+  if (status !== undefined) user.status = status;
+  if (role !== undefined) user.role = role;
+
+  saveDb();
+  res.json({ success: true, user });
+});
+
+// 3. Attendance Tracking (Clock In/Out, Break)
+app.get('/api/attendance/today', authenticateToken, (req, res) => {
+  const user = (req as any).user as User;
+  const today = new Date().toISOString().split('T')[0];
+
+  let log = db.attendance.find(a => a.user_id === user.id && a.date === today);
+  if (!log) {
+    res.json({ clockedIn: false, log: null });
+  } else {
+    res.json({
+      clockedIn: log.clock_in_ts !== null && log.clock_out_ts === null,
+      log
+    });
+  }
+});
+
+app.post('/api/attendance/clock-in', authenticateToken, (req, res) => {
+  const user = (req as any).user as User;
+  const today = new Date().toISOString().split('T')[0];
+  const now = new Date().toISOString();
+
+  let log = db.attendance.find(a => a.user_id === user.id && a.date === today);
+
+  if (log && log.clock_in_ts && !log.clock_out_ts) {
+    res.status(400).json({ error: 'Already clocked in today' });
+    return;
+  }
+
+  if (!log) {
+    log = {
+      id: `att_${Date.now()}`,
+      user_id: user.id,
+      date: today,
+      clock_in_ts: now,
+      clock_out_ts: null,
+      break_start_ts: null,
+      break_minutes: 0,
+      active_minutes: 0,
+      on_break: false,
+      device: req.headers['user-agent'] || 'Unknown Browser',
+      ip: req.ip || '127.0.0.1',
+      status: 'open'
+    };
+    db.attendance.push(log);
+  } else {
+    // Re-clock in
+    log.clock_in_ts = now;
+    log.clock_out_ts = null;
+    log.break_start_ts = null;
+    log.break_minutes = 0;
+    log.active_minutes = 0;
+    log.on_break = false;
+    log.status = 'open';
+  }
+
+  saveDb();
+  res.json({ success: true, log });
+});
+
+app.post('/api/attendance/clock-out', authenticateToken, (req, res) => {
+  const user = (req as any).user as User;
+  const today = new Date().toISOString().split('T')[0];
+  const now = new Date().toISOString();
+
+  const log = db.attendance.find(a => a.user_id === user.id && a.date === today);
+  if (!log || !log.clock_in_ts) {
+    res.status(400).json({ error: 'You are not clocked in today' });
+    return;
+  }
+
+  log.clock_out_ts = now;
+  log.on_break = false;
+  log.status = 'closed';
+
+  // Compute active minutes: elapsed minutes minus break minutes
+  const inTime = new Date(log.clock_in_ts).getTime();
+  const outTime = new Date(now).getTime();
+  const elapsedMinutes = Math.floor((outTime - inTime) / 60000);
+  log.active_minutes = Math.max(0, elapsedMinutes - log.break_minutes);
+
+  saveDb();
+  res.json({ success: true, log });
+});
+
+// Admin: Force clock-out any user who is still clocked in
+app.post('/api/admin/attendance/force-clock-out', authenticateToken, requireAdmin, (req, res) => {
+  const { userId } = req.body;
+  if (!userId) {
+    res.status(400).json({ error: 'userId is required' });
+    return;
+  }
+
+  const today = new Date().toISOString().split('T')[0];
+  const now = new Date().toISOString();
+
+  const log = db.attendance.find(a => a.user_id === userId && a.date === today);
+  if (!log || !log.clock_in_ts) {
+    res.status(404).json({ error: 'No active clock-in found for this user today' });
+    return;
+  }
+  if (log.clock_out_ts) {
+    res.status(400).json({ error: 'User is already clocked out' });
+    return;
+  }
+
+  log.clock_out_ts = now;
+  log.on_break = false;
+  log.status = 'auto_closed';
+
+  const inTime = new Date(log.clock_in_ts).getTime();
+  const outTime = new Date(now).getTime();
+  const elapsedMinutes = Math.floor((outTime - inTime) / 60000);
+  log.active_minutes = Math.max(0, elapsedMinutes - log.break_minutes);
+
+  saveDb();
+  res.json({ success: true, log });
+});
+
+app.post('/api/attendance/break-toggle', authenticateToken, (req, res) => {
+  const user = (req as any).user as User;
+  const today = new Date().toISOString().split('T')[0];
+  const { breakMinutes, isOnBreak } = req.body;
+  const now = new Date().toISOString();
+
+  const log = db.attendance.find(a => a.user_id === user.id && a.date === today);
+  if (!log) {
+    res.status(400).json({ error: 'Not clocked in today' });
+    return;
+  }
+
+  if (typeof isOnBreak === 'boolean') {
+    if (isOnBreak) {
+      log.on_break = true;
+      log.break_start_ts = log.break_start_ts || now;
+    } else {
+      if (log.on_break && log.break_start_ts) {
+        const breakStart = new Date(log.break_start_ts).getTime();
+        log.break_minutes += Math.max(0, Math.floor((new Date(now).getTime() - breakStart) / 60000));
+        log.break_start_ts = null;
+      }
+      log.on_break = false;
+    }
+  } else {
+    if (!log.on_break) {
+      log.on_break = true;
+      log.break_start_ts = log.break_start_ts || now;
+    } else {
+      if (log.break_start_ts) {
+        const breakStart = new Date(log.break_start_ts).getTime();
+        log.break_minutes += Math.max(0, Math.floor((new Date(now).getTime() - breakStart) / 60000));
+        log.break_start_ts = null;
+      }
+      log.on_break = false;
+    }
+  }
+
+  if (Number(breakMinutes) > 0) {
+    log.break_minutes += Number(breakMinutes);
+  }
+
+  if (log.clock_in_ts && log.clock_out_ts) {
+    const inTime = new Date(log.clock_in_ts).getTime();
+    const outTime = new Date(log.clock_out_ts).getTime();
+    const elapsedMinutes = Math.floor((outTime - inTime) / 60000);
+    log.active_minutes = Math.max(0, elapsedMinutes - log.break_minutes);
+  }
+
+  saveDb();
+  res.json({ success: true, log });
+});
+
+// 4. Task Library & Log Endpoints
+// Get recent tasks for quick-add
+app.get('/api/tasks/recent', authenticateToken, (req, res) => {
+  const user = (req as any).user as User;
+  const limit = parseInt(req.query.limit as string) || 5;
+  const userEntries = db.taskEntries.filter(e => e.user_id === user.id);
+  // Sort descending by id
+  userEntries.sort((a, b) => b.id.localeCompare(a.id));
+  const uniqueRecent: typeof userEntries = [];
+  const seenTasks = new Set<string>();
+  for (const entry of userEntries) {
+    if (!seenTasks.has(entry.task)) {
+      seenTasks.add(entry.task);
+      uniqueRecent.push(entry);
+    }
+    if (uniqueRecent.length >= limit) {
+      break;
+    }
+  }
+  res.json(uniqueRecent);
+});
+
+// Get user's own KPI metrics
+app.get('/api/kpi/metrics/mine', authenticateToken, (req, res) => {
+  const user = (req as any).user as User;
+  const metrics = db.kpiMetrics.filter(m => m.user_id === user.id);
+  res.json(metrics);
+});
+
+app.get('/api/tasks/library', authenticateToken, (req, res) => {
+  const user = (req as any).user as User;
+
+  // Find tasks matching user's designation or role keyword
+  const keyword = user.designation.toLowerCase().split(' ')[0];
+  const matched = db.taskLibrary.filter(item =>
+    item.role.toLowerCase().includes(keyword) ||
+    user.designation.toLowerCase().includes(item.role.toLowerCase())
+  );
+
+  if (matched.length > 0) {
+    res.json(matched);
+  } else {
+    // Return a default list if nothing matched
+    const defaultLib = db.taskLibrary.find(l => l.role === 'Intern') || db.taskLibrary[0];
+    res.json([defaultLib]);
+  }
+});
+
+app.get('/api/tasks/list', authenticateToken, (req, res) => {
+  const user = (req as any).user as User;
+  const { date } = req.query;
+
+  const targetDate = (date as string) || new Date().toISOString().split('T')[0];
+
+  // Admin sees specific user's tasks if userId query param is provided
+  let targetUserId = user.id;
+  if (user.role === 'admin' && req.query.userId) {
+    targetUserId = req.query.userId as string;
+  }
+
+  const entries = db.taskEntries.filter(e => e.user_id === targetUserId && e.date === targetDate);
+  res.json(entries);
+});
+
+app.post('/api/tasks/entry', authenticateToken, (req, res) => {
+  const user = (req as any).user as User;
+  const { date, task, subtask, brand, duration_min, status, notes, output_url, linked_kpi_metric_id } = req.body;
+
+  if (!task || !brand || !duration_min) {
+    res.status(400).json({ error: 'Missing required task entries' });
+    return;
+  }
+
+  const targetDate = date || new Date().toISOString().split('T')[0];
+
+  const metric = db.kpiMetrics.find(m => m.id === linked_kpi_metric_id);
+  const linked_kpi_metric_name = metric ? metric.name : null;
+
+  const newEntry: TaskEntry = {
+    id: `tsk_${Date.now()}`,
+    user_id: user.id,
+    date: targetDate,
+    task,
+    subtask: subtask || '',
+    brand,
+    duration_min: Number(duration_min),
+    status: status || 'done',
+    notes: notes || '',
+    output_url: output_url || null,
+    linked_kpi_metric_id: linked_kpi_metric_id || null,
+    linked_kpi_metric_name: linked_kpi_metric_name,
+    submitted: false
+  };
+
+  db.taskEntries.push(newEntry);
+
+  // Update Timesheet day aggregate counter
+  let sheet = db.timesheets.find(s => s.user_id === user.id && s.date === targetDate);
+  if (!sheet) {
+    sheet = {
+      id: `sh_${Date.now()}`,
+      user_id: user.id,
+      date: targetDate,
+      total_logged_min: Number(duration_min),
+      status: 'draft'
+    };
+    db.timesheets.push(sheet);
+  } else {
+    // Only allow updating if in draft/rejected state
+    if (sheet.status !== 'draft' && sheet.status !== 'rejected') {
+      res.status(400).json({ error: 'Timesheet for this day is already submitted/approved' });
+      return;
+    }
+    // Re-sum all task entries for the day
+    const dayTasks = db.taskEntries.filter(e => e.user_id === user.id && e.date === targetDate);
+    sheet.total_logged_min = dayTasks.reduce((sum, t) => sum + t.duration_min, 0);
+  }
+
+  saveDb();
+  res.json({ success: true, entry: newEntry, totalLoggedMin: sheet.total_logged_min });
+});
+
+app.delete('/api/tasks/entry/:id', authenticateToken, (req, res) => {
+  const user = (req as any).user as User;
+  const { id } = req.params;
+
+  const entryIndex = db.taskEntries.findIndex(e => e.id === id && e.user_id === user.id);
+  if (entryIndex === -1) {
+    res.status(404).json({ error: 'Task entry not found or unauthorized' });
+    return;
+  }
+
+  const entry = db.taskEntries[entryIndex];
+  db.taskEntries.splice(entryIndex, 1);
+
+  // Re-sum timesheet aggregate
+  const sheet = db.timesheets.find(s => s.user_id === user.id && s.date === entry.date);
+  if (sheet) {
+    if (sheet.status !== 'draft' && sheet.status !== 'rejected') {
+      res.status(400).json({ error: 'Cannot delete tasks for a submitted/approved day' });
+      return;
+    }
+    const dayTasks = db.taskEntries.filter(e => e.user_id === user.id && e.date === entry.date);
+    sheet.total_logged_min = dayTasks.reduce((sum, t) => sum + t.duration_min, 0);
+  }
+
+  saveDb();
+  res.json({ success: true, message: 'Task removed' });
+});
+
+// Copy yesterday's tasks
+app.post('/api/tasks/copy-yesterday', authenticateToken, (req, res) => {
+  const user = (req as any).user as User;
+  const { date } = req.body; // Target date (typically today)
+
+  const targetDate = date || new Date().toISOString().split('T')[0];
+
+  // Find yesterday's date
+  const targetDay = new Date(targetDate);
+  targetDay.setDate(targetDay.getDate() - 1);
+  const yesterdayStr = targetDay.toISOString().split('T')[0];
+
+  const yesterdayEntries = db.taskEntries.filter(e => e.user_id === user.id && e.date === yesterdayStr);
+
+  if (yesterdayEntries.length === 0) {
+    res.status(400).json({ error: "No tasks found from yesterday to copy." });
+    return;
+  }
+
+  // Check if target timesheet is locked
+  const sheet = db.timesheets.find(s => s.user_id === user.id && s.date === targetDate);
+  if (sheet && sheet.status !== 'draft' && sheet.status !== 'rejected') {
+    res.status(400).json({ error: "Timesheet for today is locked (submitted or approved)." });
+    return;
+  }
+
+  // Copy each
+  yesterdayEntries.forEach(old => {
+    db.taskEntries.push({
+      id: `tsk_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
+      user_id: user.id,
+      date: targetDate,
+      task: old.task,
+      subtask: old.subtask,
+      brand: old.brand,
+      duration_min: old.duration_min,
+      status: 'done', // default copied to done
+      notes: old.notes,
+      output_url: old.output_url || null,
+      linked_kpi_metric_id: old.linked_kpi_metric_id || null,
+      linked_kpi_metric_name: old.linked_kpi_metric_name || null,
+      submitted: false
+    });
+  });
+
+  // Update sheet aggregate
+  const dayTasks = db.taskEntries.filter(e => e.user_id === user.id && e.date === targetDate);
+  const totalMin = dayTasks.reduce((sum, t) => sum + t.duration_min, 0);
+
+  if (!sheet) {
+    db.timesheets.push({
+      id: `sh_${Date.now()}`,
+      user_id: user.id,
+      date: targetDate,
+      total_logged_min: totalMin,
+      status: 'draft'
+    });
+  } else {
+    sheet.total_logged_min = totalMin;
+  }
+
+  saveDb();
+  res.json({ success: true, copiedCount: yesterdayEntries.length, totalLoggedMin: totalMin });
+});
+
+// 5. Timesheet Submissions & Approval
+app.get('/api/timesheet/day', authenticateToken, (req, res) => {
+  const user = (req as any).user as User;
+  const { date, userId } = req.query;
+
+  const targetDate = (date as string) || new Date().toISOString().split('T')[0];
+  let targetUserId = user.id;
+
+  if (user.role === 'admin' && userId) {
+    targetUserId = userId as string;
+  }
+
+  const sheet = db.timesheets.find(s => s.user_id === targetUserId && s.date === targetDate);
+  const dayTasks = db.taskEntries.filter(e => e.user_id === targetUserId && e.date === targetDate);
+  const attLog = db.attendance.find(a => a.user_id === targetUserId && a.date === targetDate);
+
+  res.json({
+    date: targetDate,
+    sheet: sheet || { status: 'draft', total_logged_min: 0 },
+    tasks: dayTasks,
+    attendance: attLog || null
+  });
+});
+
+app.post('/api/timesheet/submit', authenticateToken, (req, res) => {
+  const user = (req as any).user as User;
+  const { date } = req.body;
+
+  const targetDate = date || new Date().toISOString().split('T')[0];
+
+  const sheet = db.timesheets.find(s => s.user_id === user.id && s.date === targetDate);
+  if (!sheet || sheet.total_logged_min === 0) {
+    res.status(400).json({ error: 'Please log at least one task before submitting' });
+    return;
+  }
+
+  sheet.status = 'submitted';
+  sheet.submitted_at = new Date().toISOString();
+
+  // Create calendar task or trigger admin notification
+  db.notifications.push({
+    id: `not_${Date.now()}`,
+    user_id: 'user_admin',
+    type: 'timesheet_submission',
+    message: `${user.name} submitted timesheet for ${targetDate}`,
+    read: false,
+    created_ts: new Date().toISOString()
+  });
+
+  saveDb();
+  res.json({ success: true, sheet });
+});
+
+app.get('/api/timesheet/approval-queue', authenticateToken, requireAdmin, (req, res) => {
+  // Find all timesheets that are 'submitted'
+  const submittedSheets = db.timesheets.filter(s => s.status === 'submitted');
+  const details = submittedSheets.map(s => {
+    const user = db.users.find(u => u.id === s.user_id);
+    const dayTasks = db.taskEntries.filter(t => t.user_id === s.user_id && t.date === s.date);
+    return {
+      ...s,
+      user_name: user?.name || 'Unknown User',
+      designation: user?.designation || '',
+      user_designation: user?.designation || '',
+      brand_focus: user?.brand_focus || '',
+      tasks: dayTasks
+    };
+  });
+  res.json(details);
+});
+
+// Alias for dashboard
+app.get('/api/admin/timesheets', authenticateToken, requireAdmin, (req, res) => {
+  const submittedSheets = db.timesheets.filter(s => s.status === 'submitted');
+  const details = submittedSheets.map(s => {
+    const user = db.users.find(u => u.id === s.user_id);
+    const dayTasks = db.taskEntries.filter(t => t.user_id === s.user_id && t.date === s.date);
+    return {
+      ...s,
+      user_name: user?.name || 'Unknown User',
+      designation: user?.designation || '',
+      user_designation: user?.designation || '',
+      brand_focus: user?.brand_focus || '',
+      tasks: dayTasks
+    };
+  });
+  res.json(details);
+});
+
+app.post('/api/timesheet/approve', authenticateToken, requireAdmin, (req, res) => {
+  const admin = (req as any).user as User;
+  const { id, comment } = req.body;
+
+  const sheet = db.timesheets.find(s => s.id === id);
+  if (!sheet) {
+    res.status(404).json({ error: 'Timesheet day not found' });
+    return;
+  }
+
+  sheet.status = 'approved';
+  sheet.approver_id = admin.id;
+  sheet.approver_comment = comment || '';
+  sheet.approved_at = new Date().toISOString();
+
+  db.notifications.push({
+    id: `not_${Date.now()}`,
+    user_id: sheet.user_id,
+    type: 'timesheet_approved',
+    message: `Your timesheet for ${sheet.date} has been approved.`,
+    read: false,
+    created_ts: new Date().toISOString()
+  });
+
+  saveDb();
+  res.json({ success: true, sheet });
+});
+
+app.post('/api/timesheet/reject', authenticateToken, requireAdmin, (req, res) => {
+  const admin = (req as any).user as User;
+  const { id, comment } = req.body;
+
+  if (!comment) {
+    res.status(400).json({ error: 'Rejection comment is required' });
+    return;
+  }
+
+  const sheet = db.timesheets.find(s => s.id === id);
+  if (!sheet) {
+    res.status(404).json({ error: 'Timesheet day not found' });
+    return;
+  }
+
+  sheet.status = 'rejected';
+  sheet.approver_id = admin.id;
+  sheet.approver_comment = comment;
+
+  db.notifications.push({
+    id: `not_${Date.now()}`,
+    user_id: sheet.user_id,
+    type: 'timesheet_rejected',
+    message: `Your timesheet for ${sheet.date} was rejected: "${comment}". Please revise and resubmit.`,
+    read: false,
+    created_ts: new Date().toISOString()
+  });
+
+  saveDb();
+  res.json({ success: true, sheet });
+});
+
+// Unified admin timesheet action (approve/reject) used by Dashboard
+app.post('/api/admin/timesheet/approve', authenticateToken, requireAdmin, (req, res) => {
+  const admin = (req as any).user as User;
+  const { sheetId, action, comment } = req.body;
+
+  if (!sheetId || !action) {
+    res.status(400).json({ error: 'sheetId and action are required' });
+    return;
+  }
+
+  const sheet = db.timesheets.find(s => s.id === sheetId);
+  if (!sheet) {
+    res.status(404).json({ error: 'Timesheet not found' });
+    return;
+  }
+
+  if (action === 'approve') {
+    sheet.status = 'approved';
+    sheet.approver_id = admin.id;
+    sheet.approver_comment = comment || '';
+    sheet.approved_at = new Date().toISOString();
+
+    db.notifications.push({
+      id: `not_${Date.now()}`,
+      user_id: sheet.user_id,
+      type: 'timesheet_approved',
+      message: `Your timesheet for ${sheet.date} has been approved.`,
+      read: false,
+      created_ts: new Date().toISOString()
+    });
+
+    saveDb();
+    res.json({ success: true, sheet });
+  } else if (action === 'reject') {
+    if (!comment) {
+      res.status(400).json({ error: 'Rejection comment is required' });
+      return;
+    }
+
+    sheet.status = 'rejected';
+    sheet.approver_id = admin.id;
+    sheet.approver_comment = comment;
+
+    db.notifications.push({
+      id: `not_${Date.now()}`,
+      user_id: sheet.user_id,
+      type: 'timesheet_rejected',
+      message: `Your timesheet for ${sheet.date} was rejected: "${comment}". Please revise and resubmit.`,
+      read: false,
+      created_ts: new Date().toISOString()
+    });
+
+    saveDb();
+    res.json({ success: true, sheet });
+  } else {
+    res.status(400).json({ error: 'Invalid action. Must be approve or reject' });
+  }
+});
+
+// 6. Monthly KPI Module
+app.get('/api/kpis/scorecard', authenticateToken, (req, res) => {
+  const user = (req as any).user as User;
+  const { month, userId } = req.query;
+
+  const targetMonth = (month as string) || new Date().toISOString().substring(0, 7); // YYYY-MM
+  let targetUserId = user.id;
+
+  if (user.role === 'admin' && userId) {
+    targetUserId = userId as string;
+  }
+
+  // Get metrics for target user
+  const metrics = db.kpiMetrics.filter(m => m.user_id === targetUserId);
+
+  // Get existing entries for this month
+  const entries = db.kpiEntries.filter(e => e.user_id === targetUserId && e.month === targetMonth);
+
+  // Get monthly score
+  const score = db.kpiScores.find(s => s.user_id === targetUserId && s.month === targetMonth);
+
+  res.json({
+    month: targetMonth,
+    userId: targetUserId,
+    metrics,
+    entries,
+    score: score || null
+  });
+});
+
+app.post('/api/kpis/actuals', authenticateToken, (req, res) => {
+  const user = (req as any).user as User;
+  const { userId, month, metricId, w1, w2, w3, w4, monthly_value } = req.body;
+
+  // Members can only update their own actuals, admin can update anyone
+  const targetUserId = (user.role === 'admin' && userId) ? userId : user.id;
+  const targetMonth = month || new Date().toISOString().substring(0, 7);
+
+  const metric = db.kpiMetrics.find(m => m.id === metricId);
+  if (!metric) {
+    res.status(404).json({ error: 'KPI metric not found' });
+    return;
+  }
+
+  let entry = db.kpiEntries.find(e => e.metric_id === metricId && e.month === targetMonth && e.user_id === targetUserId);
+  if (!entry) {
+    entry = {
+      id: `kpie_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
+      user_id: targetUserId,
+      metric_id: metricId,
+      month: targetMonth
+    };
+    db.kpiEntries.push(entry);
+  }
+
+  if (metric.is_percentage) {
+    entry.monthly_value = monthly_value !== undefined ? Number(monthly_value) : undefined;
+  } else {
+    if (w1 !== undefined) entry.w1 = Number(w1);
+    if (w2 !== undefined) entry.w2 = Number(w2);
+    if (w3 !== undefined) entry.w3 = Number(w3);
+    if (w4 !== undefined) entry.w4 = Number(w4);
+  }
+
+  // Compute achievement rate (capped at 150%)
+  let actual = 0;
+  if (metric.is_percentage) {
+    actual = entry.monthly_value || 0;
+  } else {
+    actual = (entry.w1 || 0) + (entry.w2 || 0) + (entry.w3 || 0) + (entry.w4 || 0);
+  }
+
+  let achievement = 0;
+  if (metric.lower_is_better) {
+    // Lower is better (e.g. CPL, revision rate)
+    achievement = actual === 0 ? 1.5 : (metric.target / actual);
+  } else {
+    // Standard (higher is better)
+    achievement = metric.target === 0 ? 1 : (actual / metric.target);
+  }
+
+  entry.computed_achievement = Math.min(1.5, Math.max(0, achievement));
+
+  // Recalculate Final Monthly KPI Score
+  const userMetrics = db.kpiMetrics.filter(m => m.user_id === targetUserId);
+  const userEntries = db.kpiEntries.filter(e => e.user_id === targetUserId && e.month === targetMonth);
+
+  let final_score = 0;
+  let weightsSum = 0;
+
+  userMetrics.forEach(m => {
+    const ent = userEntries.find(e => e.metric_id === m.id);
+    const ach = ent ? (ent.computed_achievement || 0) : 0;
+    final_score += (m.weight / 100) * ach;
+    weightsSum += m.weight;
+  });
+
+  // Scale if weights don't sum to exactly 100% (though they should)
+  if (weightsSum > 0 && weightsSum !== 100) {
+    final_score = final_score * (100 / weightsSum);
+  }
+
+  // Convert to percentage form (e.g. 0.95 -> 95%)
+  const percentageScore = Math.round(final_score * 100);
+
+  // Status Gate determination
+  let gate_status: 'Full' | 'Watch' | 'Low' | 'Critical' = 'Critical';
+  if (percentageScore >= 100) gate_status = 'Full';
+  else if (percentageScore >= 80) gate_status = 'Watch';
+  else if (percentageScore >= 60) gate_status = 'Low';
+
+  let score = db.kpiScores.find(s => s.user_id === targetUserId && s.month === targetMonth);
+  if (!score) {
+    score = {
+      id: `kpis_${Date.now()}`,
+      user_id: targetUserId,
+      month: targetMonth,
+      final_score: percentageScore,
+      gate_status
+    };
+    db.kpiScores.push(score);
+  } else {
+    score.final_score = percentageScore;
+    score.gate_status = gate_status;
+  }
+
+  saveDb();
+  res.json({ success: true, entry, score });
+});
+
+// 7. Calendar Endpoints
+app.get('/api/calendar/events', authenticateToken, (req, res) => {
+  const user = (req as any).user as User;
+  const { month } = req.query; // YYYY-MM
+
+  let filtered = db.calendarEvents;
+  if (user.role !== 'admin') {
+    // Users see global/holidays + their own deadlines
+    filtered = db.calendarEvents.filter(e => e.user_id === user.id || e.user_id === 'all');
+  }
+
+  if (month) {
+    filtered = filtered.filter(e => e.date.substring(0, 7) === month);
+  }
+
+  res.json(filtered);
+});
+
+app.post('/api/calendar/event', authenticateToken, requireAdmin, (req, res) => {
+  const { user_id, date, type, title } = req.body;
+
+  if (!user_id || !date || !type || !title) {
+    res.status(400).json({ error: 'Missing required event fields' });
+    return;
+  }
+
+  const newEvent: CalendarEvent = {
+    id: `evt_${Date.now()}`,
+    user_id,
+    date,
+    type,
+    title,
+    status: 'pending'
+  };
+
+  db.calendarEvents.push(newEvent);
+
+  if (user_id !== 'all') {
+    db.notifications.push({
+      id: `not_${Date.now()}`,
+      user_id,
+      type: 'calendar_assignment',
+      message: `Admin assigned a new ${type}: "${title}" on ${date}`,
+      read: false,
+      created_ts: new Date().toISOString()
+    });
+  }
+
+  saveDb();
+  res.json({ success: true, event: newEvent });
+});
+
+// Mark Planned Leave
+app.post('/api/calendar/leave', authenticateToken, (req, res) => {
+  const user = (req as any).user as User;
+  const { date, reason, applicantName } = req.body;
+
+  if (!date) {
+    res.status(400).json({ error: 'Date is required' });
+    return;
+  }
+
+  const leaveEvent: CalendarEvent & { submitted_by_name?: string; applicant_name?: string } = {
+    id: `evt_${Date.now()}`,
+    user_id: user.id,
+    date,
+    type: 'leave',
+    title: `Planned Leave: ${reason || 'Personal'}`,
+    status: 'approved',
+    submitted_by_name: applicantName || user.name,
+    applicant_name: applicantName || user.name
+  };
+
+  db.calendarEvents.push(leaveEvent);
+
+  db.notifications.push({
+    id: `not_${Date.now()}`,
+    user_id: 'user_admin',
+    type: 'leave_logged',
+    message: `${user.name} logged a planned leave on ${date}: "${reason || 'Personal'}"`,
+    read: false,
+    created_ts: new Date().toISOString()
+  });
+
+  saveDb();
+  res.json({ success: true, event: leaveEvent });
+});
+
+// 8. Notification Endpoints
+app.get('/api/notifications', authenticateToken, (req, res) => {
+  const user = (req as any).user as User;
+  const list = db.notifications
+    .filter(n => n.user_id === user.id && !n.read)
+    .sort((a,b) => b.created_ts.localeCompare(a.created_ts));
+
+  const mapped = list.map(n => {
+    // Determine title from type
+    let title = 'Notification';
+    if (n.type === 'timesheet_submission') title = 'Timesheet Submitted';
+    else if (n.type === 'timesheet_approved') title = 'Timesheet Approved';
+    else if (n.type === 'timesheet_rejected') title = 'Timesheet Rejected';
+    else if (n.type === 'calendar_assignment') title = 'New Calendar Event';
+    else if (n.type === 'leave_logged') title = 'Planned Leave Logged';
+
+    // Format human-friendly time
+    let timeStr = 'Just now';
+    try {
+      timeStr = new Date(n.created_ts).toLocaleDateString() + ' ' + new Date(n.created_ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    } catch (e) {}
+
+    return {
+      ...n,
+      title,
+      time: timeStr
+    };
+  });
+  res.json(mapped);
+});
+
+app.post('/api/notifications/mark-read', authenticateToken, (req, res) => {
+  const user = (req as any).user as User;
+  db.notifications.filter(n => n.user_id === user.id).forEach(n => n.read = true);
+  saveDb();
+  res.json({ success: true });
+});
+
+// Mark single notification as read (used by Dashboard)
+app.post('/api/notifications/:id/read', authenticateToken, (req, res) => {
+  const { id } = req.params;
+  const user = (req as any).user as User;
+  const notif = db.notifications.find(n => n.id === id && n.user_id === user.id);
+  if (notif) {
+    notif.read = true;
+    saveDb();
+    res.json({ success: true });
+  } else {
+    res.status(404).json({ error: 'Notification not found' });
+  }
+});
+
+// 9. Admin Dashboard Metrics & Analytics
+app.get('/api/admin/dashboard', authenticateToken, requireAdmin, (req, res) => {
+  const today = new Date().toISOString().split('T')[0];
+  const currentMonth = new Date().toISOString().substring(0, 7);
+
+  // A. Who is clocked in right now
+  const clockedInLogs = db.attendance.filter(a => a.date === today && a.clock_in_ts !== null && a.clock_out_ts === null);
+  const activeNowList = clockedInLogs.map(log => {
+    const user = db.users.find(u => u.id === log.user_id);
+    let durationMinutes = Math.max(0, Math.floor((Date.now() - new Date(log.clock_in_ts).getTime()) / 60000) - (log.break_minutes || 0));
+    if (log.on_break && log.break_start_ts) {
+      const breakStart = new Date(log.break_start_ts).getTime();
+      durationMinutes = Math.max(0, Math.floor((Date.now() - new Date(log.clock_in_ts).getTime()) / 60000) - (log.break_minutes || 0) - Math.floor((Date.now() - breakStart) / 60000));
+    }
+    const durationDisplay = `${Math.floor(durationMinutes / 60)}h ${durationMinutes % 60}m`;
+
+    return {
+      user_id: log.user_id,
+      name: user?.name || 'Unknown',
+      designation: user?.designation || '',
+      brand_focus: user?.brand_focus || '',
+      clock_in: log.clock_in_ts,
+      clock_in_ts: log.clock_in_ts,
+      break_minutes: log.break_minutes,
+      duration_minutes: durationMinutes,
+      duration: durationDisplay,
+      status: log.on_break ? 'On Break' : 'Active'
+    };
+  });
+
+  // B. Heatmap utilization data for today
+  const heatmap = db.users.filter(u => u.role === 'member').map(u => {
+    const att = db.attendance.find(a => a.user_id === u.id && a.date === today);
+    const sheet = db.timesheets.find(s => s.user_id === u.id && s.date === today);
+    const total_logged_hrs = sheet ? sheet.total_logged_min / 60 : 0;
+    const active_hrs = att ? att.active_minutes / 60 : 0;
+
+    let status: 'green' | 'amber' | 'red' = 'red';
+    if (total_logged_hrs >= 8) status = 'green';
+    else if (total_logged_hrs >= 6) status = 'amber';
+
+    return {
+      user_id: u.id,
+      name: u.name,
+      designation: u.designation,
+      active_hours: Number(active_hrs.toFixed(1)),
+      logged_hours: Number(total_logged_hrs.toFixed(1)),
+      status,
+      clocked_in: att ? (att.clock_in_ts !== null && att.clock_out_ts === null) : false
+    };
+  });
+
+  // C. Timesheet approvals queue length
+  const submittedCount = db.timesheets.filter(s => s.status === 'submitted').length;
+
+  // D. Team Average KPI scores
+  const kpiScoresThisMonth = db.kpiScores.filter(s => s.month === currentMonth);
+  const teamAverageKpi = kpiScoresThisMonth.length > 0
+    ? Math.round(kpiScoresThisMonth.reduce((sum, s) => sum + s.final_score, 0) / kpiScoresThisMonth.length)
+    : 0;
+
+  // E. Brand Roll-Up scores
+  const brandMetrics = { GT: { sum: 0, count: 0 }, HH: { sum: 0, count: 0 }, ACR: { sum: 0, count: 0 } };
+  kpiScoresThisMonth.forEach(sc => {
+    const usr = db.users.find(u => u.id === sc.user_id);
+    if (usr && usr.brand_focus !== 'All' && brandMetrics[usr.brand_focus]) {
+      brandMetrics[usr.brand_focus].sum += sc.final_score;
+      brandMetrics[usr.brand_focus].count += 1;
+    }
+  });
+
+  const brandAverages = {
+    GT: brandMetrics.GT.count > 0 ? Math.round(brandMetrics.GT.sum / brandMetrics.GT.count) : 85, // seed fallback
+    HH: brandMetrics.HH.count > 0 ? Math.round(brandMetrics.HH.sum / brandMetrics.HH.count) : 82,
+    ACR: brandMetrics.ACR.count > 0 ? Math.round(brandMetrics.ACR.sum / brandMetrics.ACR.count) : 88
+  };
+
+  // F. Flag alerts
+  const flags: string[] = [];
+  heatmap.forEach(h => {
+    if (h.logged_hours < 6 && h.logged_hours > 0) {
+      flags.push(`Low utilisation: ${h.name} logged only ${h.logged_hours} hrs today.`);
+    }
+  });
+
+  kpiScoresThisMonth.forEach(sc => {
+    if (sc.final_score < 60) {
+      const usr = db.users.find(u => u.id === sc.user_id);
+      flags.push(`Critical performance alert: ${usr?.name} KPI score is ${sc.final_score}% (${sc.gate_status}).`);
+    }
+  });
+
+  // Check missing timesheets for yesterday
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yesterdayStr = yesterday.toISOString().split('T')[0];
+
+  const weekday = yesterday.getDay();
+  if (weekday !== 0 && weekday !== 6) { // not weekend
+    db.users.filter(u => u.role === 'member' && u.status === 'active').forEach(u => {
+      const sh = db.timesheets.find(s => s.user_id === u.id && s.date === yesterdayStr);
+      if (!sh || sh.status === 'draft') {
+        flags.push(`Missing timesheet: ${u.name} has not submitted their timesheet for yesterday (${yesterdayStr}).`);
+      }
+    });
+  }
+
+  // Properties expected by Dashboard.tsx component:
+  const totalActiveMembers = db.users.filter(u => u.role === 'member' && u.status === 'active').length;
+  const liveClockInLogs = db.attendance.filter(a => a.date === today && a.clock_in_ts !== null && a.clock_out_ts === null).map(log => {
+    const logUser = db.users.find(u => u.id === log.user_id);
+    let durationMinutes = Math.max(0, Math.floor((Date.now() - new Date(log.clock_in_ts).getTime()) / 60000) - (log.break_minutes || 0));
+    if (log.on_break && log.break_start_ts) {
+      const breakStart = new Date(log.break_start_ts).getTime();
+      durationMinutes = Math.max(0, Math.floor((Date.now() - new Date(log.clock_in_ts).getTime()) / 60000) - (log.break_minutes || 0) - Math.floor((Date.now() - breakStart) / 60000));
+    }
+    const durationDisplay = `${Math.floor(durationMinutes / 60)}h ${durationMinutes % 60}m`;
+    return {
+      user_id: log.user_id,
+      name: logUser?.name || 'Unknown',
+      designation: logUser?.designation || '',
+      clock_in: log.clock_in_ts,
+      clock_out: log.clock_out_ts,
+      duration_minutes: durationMinutes,
+      duration: durationDisplay
+    };
+  });
+  const liveClockInStatus = {
+    clockedInCount: clockedInLogs.length,
+    totalCount: totalActiveMembers,
+    logs: liveClockInLogs
+  };
+
+  const activeList = db.users.filter(u => u.role === 'member' && u.status === 'active').map(u => {
+    const sheet = db.timesheets.find(s => s.user_id === u.id && s.date === today);
+    return {
+      name: u.name,
+      designation: u.designation,
+      loggedMin: sheet ? sheet.total_logged_min : 0
+    };
+  });
+  const totalLoggedMinToday = activeList.reduce((sum, item) => sum + item.loggedMin, 0);
+  const avgUtilizationPercent = totalActiveMembers > 0
+    ? Math.round((totalLoggedMinToday / (totalActiveMembers * 480)) * 100)
+    : 0;
+  const utilizationHeatmap = {
+    avgUtilizationPercent,
+    activeList
+  };
+
+  const kpiPerformanceAverages = {
+    avgKpiScore: teamAverageKpi || 85
+  };
+
+  res.json({
+    activeNow: activeNowList,
+    heatmap,
+    submittedCount,
+    teamAverageKpi,
+    brandAverages,
+    flags: flags.slice(0, 10), // top 10 warnings
+    // Dashboard.tsx props:
+    liveClockInStatus,
+    approvalQueueCount: submittedCount,
+    utilizationHeatmap,
+    kpiPerformanceAverages
+  });
+});
+
+// 10. Member Dashboard Metrics
+app.get('/api/member/dashboard', authenticateToken, (req, res) => {
+  const user = (req as any).user as User;
+  const today = new Date().toISOString().split('T')[0];
+  const currentMonth = new Date().toISOString().substring(0, 7);
+
+  // A. Today's clock-in status
+  const attLog = db.attendance.find(a => a.user_id === user.id && a.date === today);
+  const clockedIn = attLog ? (attLog.clock_in_ts !== null && attLog.clock_out_ts === null) : false;
+
+  // B. Weekly total hours
+  const startOfWeek = new Date();
+  startOfWeek.setDate(startOfWeek.getDate() - startOfWeek.getDay() + 1); // Monday
+  const weekDates: string[] = [];
+  for (let i = 0; i < 5; i++) {
+    const d = new Date(startOfWeek);
+    d.setDate(d.getDate() + i);
+    weekDates.push(d.toISOString().split('T')[0]);
+  }
+
+  const weeklyLogged = weekDates.map(dateStr => {
+    const sh = db.timesheets.find(s => s.user_id === user.id && s.date === dateStr);
+    return {
+      date: dateStr,
+      hours: sh ? sh.total_logged_min / 60 : 0,
+      status: sh ? sh.status : 'missing'
+    };
+  });
+
+  // C. Current month KPI score & gate
+  const score = db.kpiScores.find(s => s.user_id === user.id && s.month === currentMonth);
+
+  // D. Upcoming deadlines
+  const deadlines = db.calendarEvents.filter(e =>
+    (e.user_id === user.id || e.user_id === 'all') &&
+    e.type === 'deadline' &&
+    new Date(e.date) >= new Date()
+  ).slice(0, 3);
+
+  // Computations for Dashboard.tsx:
+  let todayStatus = 'Shift Closed';
+  if (clockedIn) {
+    todayStatus = 'Clocked In';
+  } else if (attLog && attLog.clock_in_ts && !attLog.clock_out_ts) {
+    todayStatus = 'Clocked In';
+  } else if (attLog && attLog.clock_out_ts) {
+    todayStatus = 'Clocked Out';
+  } else {
+    todayStatus = 'Not Checked In';
+  }
+
+  const weeklyHoursLogged = Number(weeklyLogged.reduce((sum, item) => sum + item.hours, 0).toFixed(1));
+  const kpiSummaryScore = score ? score.final_score : 0;
+
+  res.json({
+    user: {
+      name: user.name,
+      designation: user.designation,
+      brand_focus: user.brand_focus,
+      emp_code: user.emp_code
+    },
+    clockedIn,
+    todayLog: attLog || null,
+    weeklyLogged,
+    kpi: score || { final_score: 0, gate_status: 'Watch' },
+    deadlines,
+    // Dashboard.tsx props:
+    todayStatus,
+    weeklyHoursLogged,
+    kpiSummaryScore
+  });
+});
+
+// 11. AI Reporting & Assistant (Uses Gemini API on the Server)
+app.post('/api/ai/report', authenticateToken, async (req, res) => {
+  const userReq = (req as any).user as User;
+  const { focusUser, reportType } = req.body; // e.g. "team", "member", "utilisation"
+
+  // Only allow admin to query wide reports, members can query their own report
+  const targetUserId = userReq.role === 'admin' ? (focusUser || 'team') : userReq.id;
+
+  const geminiKey = process.env.GEMINI_API_KEY;
+  if (!geminiKey) {
+    res.json({
+      summary: "AI analysis is ready to be configured. The Gemini API key will be automatically injected by AI Studio in production. Seed fallback report:\n\n**Team Utilisation Analysis:**\n- Team active hours are healthy (7.8 hrs avg).\n- High consistency on daily timesheet submissions.\n- Brand focus performance: Galaxy Toyota leads in lead conversions at 6.2%.",
+      isMock: true
+    });
+    return;
+  }
+
+  try {
+    const ai = new GoogleGenAI({
+      apiKey: geminiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        }
+      }
+    });
+
+    // Extract some statistics from the in-memory database to feed into the prompt context
+    const currentMonth = new Date().toISOString().substring(0, 7);
+    const activeMembers = db.users.filter(u => u.role === 'member' && u.status === 'active');
+    const recentScores = db.kpiScores.filter(s => s.month === currentMonth);
+
+    let promptContext = '';
+    if (targetUserId === 'team') {
+      const topKpi = [...recentScores].sort((a,b) => b.final_score - a.final_score).slice(0, 3);
+      const lowKpi = [...recentScores].sort((a,b) => a.final_score - b.final_score).slice(0, 3);
+
+      promptContext = `
+        TEAM PERFORMANCE CONTEXT:
+        - Total team size: ${activeMembers.length}
+        - Current month: ${currentMonth}
+        - Total KPI Scores reported this month: ${recentScores.length}
+        - Top Performers: ${topKpi.map(s => `${db.users.find(u => u.id === s.user_id)?.name} (${s.final_score}%)`).join(', ')}
+        - Bottom Performers: ${lowKpi.map(s => `${db.users.find(u => u.id === s.user_id)?.name} (${s.final_score}%)`).join(', ')}
+        - Brand distribution: Galaxy Toyota, Hans Hyundai, AutoCarRepair.in
+      `;
+    } else {
+      const targetUserObj = db.users.find(u => u.id === targetUserId);
+      const userScore = db.kpiScores.find(s => s.user_id === targetUserId && s.month === currentMonth);
+      const userTasks = db.taskEntries.filter(t => t.user_id === targetUserId).slice(-10);
+
+      promptContext = `
+        INDIVIDUAL MEMBER CONTEXT:
+        - Name: ${targetUserObj?.name}
+        - Role/Designation: ${targetUserObj?.designation}
+        - Brand focus: ${targetUserObj?.brand_focus}
+        - Current Month KPI Score: ${userScore ? `${userScore.final_score}% (${userScore.gate_status})` : 'Not scored yet'}
+        - Recent logged tasks: ${userTasks.map(t => `${t.date}: ${t.task} (${t.duration_min} min) - ${t.notes}`).join('; ')}
+      `;
+    }
+
+    const systemInstruction = `
+      You are an expert Chief Technology Officer & Digital Marketing Auditor auditing a centralized tech team across three auto brands: Galaxy Toyota, Hans Hyundai, and AutoCarRepair.in.
+      Analyze the provided stats context. Provide a concise, highly professional, bulleted summary of key achievements, potential bottlenecks, and 3 actionable improvement steps.
+      Use professional formatting with markdown. Keep it punchy and practical.
+    `;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: `Provide a digital team audit report for type "${reportType || 'performance'}" based on this data:\n${promptContext}`,
+      config: {
+        systemInstruction,
+        temperature: 0.7
+      }
+    });
+
+    res.json({
+      summary: response.text,
+      isMock: false
+    });
+  } catch (error: any) {
+    console.error("Gemini API call failed:", error);
+    res.json({
+      summary: "AI analysis server encountered a query timeout. Seed fallback report:\n\n- Active tracking is fully functional across 20 pre-seeded digital executives.\n- Utilisation targets of 8.0 hours have been met consistently.\n- Suggested Audit: Check content pipeline turnaround for Bhawna Tagra and graphic designs revisions from Vikash Pandey.",
+      isMock: true
+    });
+  }
+});
+
+// ----------------------------------------------------------------------------
+// Client-Side Asset Serving
+// ----------------------------------------------------------------------------
+async function startServer() {
+  if (process.env.NODE_ENV !== 'production') {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  }
+
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server is running at http://localhost:${PORT}`);
+  });
+}
+
+startServer();

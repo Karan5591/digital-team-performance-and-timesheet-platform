@@ -1,0 +1,381 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+//
+// ENUMS
+//
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum TaskStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum TimesheetStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  REJECTED
+}
+
+enum NotificationType {
+  INFO
+  WARNING
+  SUCCESS
+}
+
+enum CalendarEventType {
+  HOLIDAY
+  LEAVE
+  EVENT
+}
+
+//
+// ROLE
+//
+
+model Role {
+  id          String   @id @default(uuid())
+  name        String   @unique
+
+  users       User[]
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+//
+// USER
+//
+
+model User {
+  id                  String   @id @default(uuid())
+
+  empCode             String   @unique
+  name                String
+  email               String   @unique
+  passwordHash        String
+
+  designation         String
+  brandFocus          String
+
+  doj                 DateTime
+
+  status              UserStatus @default(ACTIVE)
+
+  mustResetPassword   Boolean @default(false)
+
+  roleId              String
+  role                Role @relation(fields: [roleId], references: [id])
+
+  attendanceLogs      AttendanceLog[]
+  attendanceBreaks    AttendanceBreak[]
+
+  taskEntries         TaskEntry[]
+
+  approvedTasks       TaskEntry[] @relation("TaskApprover")
+
+  timesheets          TimesheetDay[]
+
+  notifications       Notification[]
+
+  calendarEvents      CalendarEvent[]
+
+  kpiMetrics          KPIMetric[]
+
+  kpiEntries          KPIEntry[]
+
+  kpiScores           KPIScore[]
+
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  isDeleted           Boolean @default(false)
+  deletedAt           DateTime?
+}
+
+//
+// ATTENDANCE
+//
+
+model AttendanceLog {
+
+  id                  String @id @default(uuid())
+
+  userId              String
+  user                User @relation(fields: [userId], references: [id])
+
+  date                DateTime
+
+  clockIn             DateTime
+  clockOut            DateTime?
+
+  breakStartTs        DateTime?
+  breakMinutes        Int @default(0)
+  activeMinutes       Int @default(0)
+  onBreak             Boolean @default(false)
+  status              String   @default("open")
+
+  device              String
+
+  ip                  String
+
+  breaks              AttendanceBreak[]
+
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  isDeleted           Boolean @default(false)
+  deletedAt           DateTime?
+}
+
+model AttendanceBreak {
+
+  id                  String @id @default(uuid())
+
+  attendanceLogId     String
+
+  attendanceLog       AttendanceLog @relation(fields:[attendanceLogId],references:[id])
+
+  userId              String
+
+  user                User @relation(fields:[userId],references:[id])
+
+  startTime           DateTime
+
+  endTime             DateTime?
+
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+//
+// TASKS
+//
+
+model TaskEntry {
+
+  id                  String @id @default(uuid())
+
+  userId              String
+
+  user                User @relation(fields:[userId],references:[id])
+
+  date                DateTime
+
+  task                String
+
+  subTask             String?
+
+  brand               String
+
+  durationMinutes     Int
+
+  notes               String?
+
+  outputUrl           String?
+
+  status              String @default("pending")
+
+  submittedAt         DateTime @default(now())
+  submitted           Boolean  @default(false)
+
+  linkedKpiMetricId   String?
+  linkedKpiMetricName String?
+
+  approverId          String?
+
+  approver            User? @relation("TaskApprover",fields:[approverId],references:[id])
+
+  approverComment     String?
+
+  approvedAt          DateTime?
+
+  createdAt           DateTime @default(now())
+
+  updatedAt           DateTime @updatedAt
+}
+
+//
+// TIMESHEET
+//
+
+model TimesheetDay {
+
+  id                  String @id @default(uuid())
+
+  userId              String
+
+  user                User @relation(fields:[userId],references:[id])
+
+  date                DateTime
+
+  totalLoggedMinutes  Int
+
+  status              TimesheetStatus @default(DRAFT)
+
+  submittedAt         DateTime?
+  approverId          String?
+  approverComment     String?
+
+  approvedAt          DateTime?
+
+  createdAt           DateTime @default(now())
+
+  updatedAt           DateTime @updatedAt
+}
+
+//
+// KPI
+//
+
+model KPIMetric {
+
+  id                  String @id @default(uuid())
+
+  userId              String
+
+  user                User @relation(fields:[userId],references:[id])
+
+  name                String
+
+  category            String
+
+  weight              Int
+
+  target              Int
+
+  lowerIsBetter       Boolean
+
+  isPercentage        Boolean
+
+  entries             KPIEntry[]
+
+  createdAt           DateTime @default(now())
+
+  updatedAt           DateTime @updatedAt
+}
+
+model KPIEntry {
+
+  id                  String @id @default(uuid())
+
+  userId              String
+
+  user                User @relation(fields:[userId],references:[id])
+
+  metricId            String
+
+  metric              KPIMetric @relation(fields:[metricId],references:[id])
+
+  month               String
+
+  week1               Int?
+
+  week2               Int?
+
+  week3               Int?
+
+  week4               Int?
+
+  monthlyValue        Int?
+
+  achievement         Float?
+  computedAchievement Float?
+
+  createdAt           DateTime @default(now())
+
+  updatedAt           DateTime @updatedAt
+}
+
+model KPIScore {
+
+  id                  String @id @default(uuid())
+
+  userId              String
+
+  user                User @relation(fields:[userId],references:[id])
+
+  month               String
+
+  finalScore          Float
+
+  gateStatus          String
+
+  createdAt           DateTime @default(now())
+
+  updatedAt           DateTime @updatedAt
+}
+
+//
+// NOTIFICATIONS
+//
+
+model Notification {
+
+  id                  String @id @default(uuid())
+
+  userId              String
+
+  user                User @relation(fields:[userId],references:[id])
+
+  type                String
+
+  message             String
+
+  read                Boolean @default(false)
+
+  createdAt           DateTime @default(now())
+}
+
+//
+// CALENDAR
+//
+
+model CalendarEvent {
+
+  id                  String @id @default(uuid())
+
+  userId              String?
+
+  user                User? @relation(fields:[userId],references:[id])
+
+  title               String
+
+  type                String
+  status              String?
+
+  date                DateTime
+
+  createdAt           DateTime @default(now())
+}
+
+//
+// INCENTIVES
+//
+
+model IncentivePool {
+
+  id                  String @id @default(uuid())
+
+  brand               String
+
+  month               String
+
+  poolAmount          Float
+
+  createdAt           DateTime @default(now())
+
+  updatedAt           DateTime @updatedAt
+}
