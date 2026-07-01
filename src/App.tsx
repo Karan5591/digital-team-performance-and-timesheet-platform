@@ -168,24 +168,7 @@ export default function App() {
           ))}
         </nav>
 
-        {/* User Card & Logout info */}
-        <div className="p-4 border-t border-gray-100 bg-gray-50/50">
-          <div className="flex items-center gap-3">
-            <div className="h-9 w-9 bg-indigo-100 rounded-xl flex items-center justify-center font-bold text-indigo-700 text-sm">
-              {user.name.charAt(0)}
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-xs font-bold text-gray-900 truncate">{user.name}</p>
-              <p className="text-[10px] text-gray-400 truncate">{user.email}</p>
-            </div>
-          </div>
-          <button
-            onClick={handleLogout}
-            className="w-full mt-4 flex items-center justify-center gap-1.5 px-3 py-2 border border-gray-200 rounded-xl text-xs font-semibold text-gray-600 hover:text-red-600 hover:bg-red-50 hover:border-red-100 transition-all"
-          >
-            <LogOut className="h-3.5 w-3.5" /> Sign Out
-          </button>
-        </div>
+        
       </aside>
 
       {/* MOBILE HEADER BAR */}
@@ -198,20 +181,37 @@ export default function App() {
             <Menu className="h-5 w-5" />
           </button>
 
+          
+
           <div className="flex items-center gap-4">
-            
-            {/* Shift Tracker clock-in alert */}
-            <div className="flex items-center gap-2 px-3 py-1 bg-gray-50 rounded-full border border-gray-200 text-xs">
-              <span className={`h-2.5 w-2.5 rounded-full ${clockedIn ? 'bg-emerald-500 animate-pulse' : 'bg-gray-300'}`}></span>
-              <span className="font-semibold text-gray-600">{clockedIn ? 'Clocked In' : 'Shift Closed'}</span>
-            </div>
 
-            {/* Profile initial logo */}
-            <div className="h-8 w-8 bg-indigo-100 rounded-lg flex items-center justify-center font-bold text-indigo-700 text-xs">
-              {user.name.charAt(0)}
-            </div>
+  <div className="flex items-center gap-2 px-3 py-1 bg-gray-50 rounded-full border border-gray-200 text-xs">
+    <span
+      className={`h-2.5 w-2.5 rounded-full ${
+        clockedIn ? 'bg-emerald-500 animate-pulse' : 'bg-gray-300'
+      }`}
+    />
+    <span className="font-semibold text-gray-600">
+      {clockedIn ? 'Clocked In' : 'Shift Closed'}
+    </span>
+  </div>
 
-          </div>
+  <div className="flex items-center gap-4">
+
+  <div className="h-9 w-9 bg-indigo-100 rounded-lg flex items-center justify-center font-bold text-indigo-700 text-sm">
+    {user.name.charAt(0)}
+  </div>
+
+  <button
+    onClick={handleLogout}
+    className="flex items-center gap-1 text-sm font-medium text-gray-600 hover:text-red-600 transition-colors"
+  >
+    <LogOut className="h-4 w-4" />
+    Sign Out
+  </button>
+
+</div>
+</div>
         </header>
 
         {/* MOBILE NAVIGATION SIDEBAR DRAWER */}
