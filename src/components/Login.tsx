@@ -260,6 +260,7 @@ export default function Login({ onLoginSuccess }: LoginProps) {
 
             
           </form>
+            
         )}
 
         {mode === 'forgot' && (
