@@ -661,6 +661,15 @@ app.post('/api/tasks/entry', authenticateToken, async (req, res) => {
   }
 
   const targetDate = (date as string) || new Date().toISOString().split('T')[0];
+
+  // Server-side 8h/day cap check
+  const existingTasks = await prisma.taskEntry.findMany({ where: { userId: user.id, date: new Date(targetDate) } }) as Array<{ durationMinutes: number }>;
+  const currentTotal = existingTasks.reduce((sum, t) => sum + t.durationMinutes, 0);
+  if (currentTotal + Number(duration_min) > 480) {
+    res.status(400).json({ error: `Daily limit is 8 hours. You can only log ${480 - currentTotal} more minute(s) today.` });
+    return;
+  }
+
   const metric = linked_kpi_metric_id ? await prisma.kPIMetric.findUnique({ where: { id: linked_kpi_metric_id } }) : null;
   const linked_kpi_metric_name = metric?.name || null;
 
@@ -692,10 +701,31 @@ app.post('/api/tasks/entry', authenticateToken, async (req, res) => {
       }
     });
   } else {
-    if (sheet.status === 'APPROVED') {
+    /*if (sheet.status === 'APPROVED') {
       res.status(400).json({ error: 'Timesheet for this day is already approved and locked' });
       return;
-    }
+    }*/
+
+// ======================check if condition again===================
+
+if (sheet.status === 'APPROVED') {
+    sheet = await prisma.timesheetDay.update({
+        where: { id: sheet.id },
+        data: {
+            status: 'DRAFT',
+            submittedAt: null,
+            approvedAt: null,
+            approverId: null,
+            approverComment: null
+        }
+    });
+}
+
+// ====================end if condition=========================
+
+
+
+
     // If submitted, reset back to DRAFT so new task can be added
     const dayTasks = await prisma.taskEntry.findMany({ where: { userId: user.id, date: new Date(targetDate) } }) as Array<{ durationMinutes: number }>;
     const newTotal = dayTasks.reduce((sum, t) => sum + t.durationMinutes, 0) + Number(duration_min);
@@ -710,6 +740,62 @@ app.post('/api/tasks/entry', authenticateToken, async (req, res) => {
   }
 
   res.json({ success: true, entry: mapTaskEntry(newEntry), totalLoggedMin: sheet.totalLoggedMinutes });
+});
+
+app.put('/api/tasks/entry/:id', authenticateToken, async (req, res) => {
+  const user = (req as any).user as User;
+  const { id } = req.params;
+  const { task, subtask, brand, duration_min, status, notes, output_url, linked_kpi_metric_id } = req.body;
+
+  const existing = await prisma.taskEntry.findUnique({ where: { id } });
+  if (!existing || existing.userId !== user.id) {
+    res.status(404).json({ error: 'Task entry not found' });
+    return;
+  }
+
+  const sheet = await prisma.timesheetDay.findFirst({ where: { userId: user.id, date: existing.date } });
+  if (sheet && sheet.status === 'APPROVED') {
+    res.status(400).json({ error: 'Timesheet for this day is already approved and locked. Cannot edit.' });
+    return;
+  }
+
+  // Server-side 8h/day cap check (excluding this task's current duration)
+  const dayTasks = await prisma.taskEntry.findMany({ where: { userId: user.id, date: existing.date } }) as Array<{ id: string; durationMinutes: number }>;
+  const otherTotal = dayTasks.filter(t => t.id !== id).reduce((sum, t) => sum + t.durationMinutes, 0);
+  if (otherTotal + Number(duration_min) > 480) {
+    res.status(400).json({ error: `Daily limit is 8 hours. You can only set up to ${480 - otherTotal} minute(s) for this task.` });
+    return;
+  }
+
+  const metric = linked_kpi_metric_id ? await prisma.kPIMetric.findUnique({ where: { id: linked_kpi_metric_id } }) : null;
+  const linked_kpi_metric_name = metric?.name || null;
+
+  const updatedEntry = await prisma.taskEntry.update({
+    where: { id },
+    data: {
+      task: task ?? existing.task,
+      subTask: subtask ?? existing.subTask,
+      brand: brand ?? existing.brand,
+      durationMinutes: duration_min !== undefined ? Number(duration_min) : existing.durationMinutes,
+      status: status ?? existing.status,
+      notes: notes ?? existing.notes,
+      outputUrl: output_url !== undefined ? output_url : existing.outputUrl,
+      linkedKpiMetricId: linked_kpi_metric_id !== undefined ? linked_kpi_metric_id : existing.linkedKpiMetricId,
+      linkedKpiMetricName: linked_kpi_metric_id !== undefined ? linked_kpi_metric_name : existing.linkedKpiMetricName
+    }
+  });
+
+  const newTotal = dayTasks.reduce((sum, t) => sum + (t.id === id ? Number(duration_min) : t.durationMinutes), 0);
+
+  let updatedSheet = sheet;
+  if (sheet) {
+    updatedSheet = await prisma.timesheetDay.update({
+      where: { id: sheet.id },
+      data: { totalLoggedMinutes: newTotal, status: 'DRAFT', submittedAt: null }
+    });
+  }
+
+  res.json({ success: true, entry: mapTaskEntry(updatedEntry), totalLoggedMin: updatedSheet?.totalLoggedMinutes ?? newTotal });
 });
 
 app.delete('/api/tasks/entry/:id', authenticateToken, async (req, res) => {
@@ -851,6 +937,12 @@ app.post('/api/timesheet/submit', authenticateToken, async (req, res) => {
     data: { status: 'SUBMITTED', submittedAt: new Date() }
   });
 
+  // Mark all of today's task entries as submitted (locks them from edit/delete in UI)
+  await prisma.taskEntry.updateMany({
+    where: { userId: user.id, date: new Date(targetDate) },
+    data: { submitted: true }
+  });
+
   await notifyAdmin(`${user.name} submitted timesheet for ${targetDate}`, 'timesheet_submission');
   res.json({ success: true, sheet: mapTimesheetDay(updated) });
 });
@@ -901,21 +993,31 @@ async function changeTimesheetStatus(sheetId: string, action: 'approve' | 'rejec
   });
 
   for (const task of tasks) {
-    if (task.outputUrl && task.outputUrl.startsWith('/uploads/')) {
-      const filePath = path.join(process.cwd(), task.outputUrl);
-      try {
-        await fs.unlink(filePath);
-      } catch {
-        // File may already be deleted — ignore
+    if (task.outputUrl) {
+      const urls = task.outputUrl.split(',').map(u => u.trim()).filter(Boolean);
+      const hadLocalFile = urls.some(u => u.startsWith('/uploads/'));
+      if (hadLocalFile) {
+        for (const url of urls) {
+          if (url.startsWith('/uploads/')) {
+            const filePath = path.join(process.cwd(), url);
+            try {
+              await fs.unlink(filePath);
+            } catch {
+              // File may already be deleted — ignore
+            }
+          }
+        }
+        // Keep any external (non-uploaded) links, drop only local file references
+        const remainingUrls = urls.filter(u => !u.startsWith('/uploads/'));
+        await prisma.taskEntry.update({
+          where: { id: task.id },
+          data: { outputUrl: remainingUrls.length > 0 ? remainingUrls.join(',') : null }
+        });
       }
-      await prisma.taskEntry.update({
-        where: { id: task.id },
-        data: { outputUrl: null }
-      });
     }
   }
 
-  const updated = await prisma.timesheetDay.update({
+const updated = await prisma.timesheetDay.update({
     where: { id: sheetId },
     data: {
       status: newStatus,
@@ -923,7 +1025,7 @@ async function changeTimesheetStatus(sheetId: string, action: 'approve' | 'rejec
       approverComment: comment || undefined,
       approvedAt: action === 'approve' ? new Date() : sheet.approvedAt
     }
-  });
+  }); 
 
   await prisma.notification.create({
     data: {
@@ -1522,6 +1624,13 @@ app.post('/api/upload', authenticateToken, upload.single('file'), (req, res) => 
   if (!req.file) { res.status(400).json({ error: 'No file uploaded' }); return; }
   const fileUrl = `/uploads/${req.file.filename}`;
   res.json({ success: true, url: fileUrl, originalName: req.file.originalname });
+});
+
+app.post('/api/upload/multi', authenticateToken, upload.array('files', 5), (req, res) => {
+  const files = req.files as Express.Multer.File[];
+  if (!files || files.length === 0) { res.status(400).json({ error: 'No files uploaded' }); return; }
+  const urls = files.map(f => `/uploads/${f.filename}`);
+  res.json({ success: true, urls });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

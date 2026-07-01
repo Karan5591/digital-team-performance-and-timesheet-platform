@@ -18,6 +18,7 @@ import {
   CheckCircle2,
   Paperclip,
   X,
+  Pencil,
 } from 'lucide-react';
 
 interface TimesheetLogProps {
@@ -45,9 +46,13 @@ export default function TimesheetLog({ token, user, onStatusChange }: TimesheetL
   const [status, setStatus] = useState<'Not started' | 'In progress' | 'Done' | 'Blocked' | 'Pending Review'>('Done');
   const [notes, setNotes] = useState('');
   const [outputUrl, setOutputUrl] = useState('');
-  const [attachedFile, setAttachedFile] = useState<File | null>(null);
-  const [attachedFilePreview, setAttachedFilePreview] = useState<string | null>(null);
+  const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
+  const [attachedPreviews, setAttachedPreviews] = useState<(string | null)[]>([]);
   const [uploadingFile, setUploadingFile] = useState(false);
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const [existingAttachmentUrls, setExistingAttachmentUrls] = useState<string[]>([]); // urls already saved, kept on edit unless removed
+  const [showSubmitted, setShowSubmitted] = useState(true);
+  const [showApproved, setShowApproved] = useState(false);
   
   // Quick pre-set durations
   const durationChips = [15, 30, 60, 120, 180];
@@ -359,6 +364,79 @@ useEffect(() => {
     });
   };
 
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const selected = Array.from(e.target.files || []);
+    if (selected.length === 0) return;
+    const combined = [...attachedFiles, ...selected].slice(0, 5); // max 5 files
+    setAttachedFiles(combined);
+    setAttachedPreviews(combined.map(f => f.type.startsWith('image/') ? URL.createObjectURL(f) : null));
+    e.target.value = ''; // allow re-selecting same file
+  };
+
+  const handleRemoveNewFile = (idx: number) => {
+    setAttachedFiles(prev => prev.filter((_, i) => i !== idx));
+    setAttachedPreviews(prev => prev.filter((_, i) => i !== idx));
+  };
+
+  const handleRemoveExistingUrl = (idx: number) => {
+    setExistingAttachmentUrls(prev => prev.filter((_, i) => i !== idx));
+  };
+
+  const uploadAttachments = async (): Promise<string[]> => {
+    if (attachedFiles.length === 0) return [];
+    setUploadingFile(true);
+    try {
+      const formData = new FormData();
+      attachedFiles.forEach(f => formData.append('files', f));
+      const res = await fetch('/api/upload/multi', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      return data.urls as string[];
+    } catch (err: any) {
+      setError('File upload failed. Task not saved.');
+      return [];
+    } finally {
+      setUploadingFile(false);
+    }
+  };
+
+  const resetForm = () => {
+    setNotes('');
+    setOutputUrl('');
+    setSelectedSubtask('');
+    setCheckpoints({});
+    setLinkedKpiMetricId('');
+    setAttachedFiles([]);
+    setAttachedPreviews([]);
+    setExistingAttachmentUrls([]);
+    setEditingTaskId(null);
+  };
+
+  const handleEditTaskClick = (t: any) => {
+    setEditingTaskId(t.id);
+    setSelectedTask(t.task);
+    setSelectedSubtask(t.subtask || '');
+    setSelectedBrand(t.brand);
+    setDurationMin(t.duration_min);
+    setStatus(statusReverseMap[t.status] as any || 'Done');
+    setNotes(t.notes || '');
+    setLinkedKpiMetricId(t.linked_kpi_metric_id || '');
+    const urls = (t.output_url || '').split(',').map((u: string) => u.trim()).filter(Boolean);
+    setExistingAttachmentUrls(urls.filter((u: string) => u.startsWith('/uploads/')));
+    setOutputUrl(urls.find((u: string) => !u.startsWith('/uploads/')) || '');
+    setAttachedFiles([]);
+    setAttachedPreviews([]);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleCancelEdit = () => {
+    resetForm();
+  };
+
   const handleAddTask = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
@@ -379,23 +457,35 @@ useEffect(() => {
       setError('Duration spent must be between 5 and 480 minutes');
       return;
     }
+    const otherTasksTotal = editingTaskId
+      ? tasks.filter(t => t.id !== editingTaskId).reduce((sum, t) => sum + t.duration_min, 0)
+      : totalLoggedMin;
+    const remainingMin = 480 - otherTasksTotal;
+    if (durationMin > remainingMin) {
+      setError(`Daily limit is 8 hours. You can only set up to ${remainingMin} minute(s) for this task.`);
+      return;
+    }
     if ((mappedStatus === 'blocked' || mappedStatus === 'pending_review') && !notes.trim()) {
       setError('Notes required when status is Blocked or Pending Review');
       return;
     }
-    if (mappedStatus === 'done' && !outputUrl.trim()) {
+    if (mappedStatus === 'done' && !outputUrl.trim() && attachedFiles.length === 0 && existingAttachmentUrls.length === 0) {
       // Soft warning only (do not block)
-      setSuccessMsg('Adding an output link helps HOD verify completion');
+      setSuccessMsg('Adding an attachment or output link helps HOD verify completion');
       setTimeout(() => setSuccessMsg(''), 6000);
     }
 
     setLoading(true);
     try {
-      const finalUrl = await uploadFile();
-      if (attachedFile && !finalUrl) { setLoading(false); return; } // upload failed
+      const newlyUploadedUrls = await uploadAttachments();
+      if (attachedFiles.length > 0 && newlyUploadedUrls.length === 0) { setLoading(false); return; } // upload failed
 
-      const res = await fetch('/api/tasks/entry', {
-        method: 'POST',
+      const allUrls = [...existingAttachmentUrls, ...newlyUploadedUrls, ...(outputUrl.trim() ? [outputUrl.trim()] : [])];
+      const finalOutputUrl = allUrls.length > 0 ? allUrls.join(',') : null;
+
+      const isEditing = !!editingTaskId;
+      const res = await fetch(isEditing ? `/api/tasks/entry/${editingTaskId}` : '/api/tasks/entry', {
+        method: isEditing ? 'PUT' : 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
@@ -408,7 +498,7 @@ useEffect(() => {
           duration_min: durationMin,
           status: mappedStatus,
           notes,
-          output_url: finalUrl || null,
+          output_url: finalOutputUrl,
           linked_kpi_metric_id: linkedKpiMetricId || null
         })
       });
@@ -416,16 +506,14 @@ useEffect(() => {
       const data = await safeParseJson(res);
       if (!res.ok) throw new Error(data.error);
 
-      setTasks(prev => [...prev, data.entry]);
+      if (isEditing) {
+        setTasks(prev => prev.map(t => t.id === editingTaskId ? data.entry : t));
+      } else {
+        setTasks(prev => [...prev, data.entry]);
+      }
       setTotalLoggedMin(data.totalLoggedMin);
-      setNotes('');
-      setOutputUrl('');
-      setAttachedFile(null);
-      setAttachedFilePreview(null);
-      setSelectedSubtask('');
-      setCheckpoints({});
-      setLinkedKpiMetricId('');
-      setSuccessMsg('Task entry added to timesheet');
+      resetForm();
+      setSuccessMsg(isEditing ? 'Task entry updated' : 'Task entry added to timesheet');
       setTimeout(() => setSuccessMsg(''), 3000);
       fetchRecentTasks();
       if (onStatusChange) onStatusChange();
@@ -433,44 +521,6 @@ useEffect(() => {
       setError(err.message);
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setAttachedFile(file);
-    if (file.type.startsWith('image/')) {
-      setAttachedFilePreview(URL.createObjectURL(file));
-    } else {
-      setAttachedFilePreview(null);
-    }
-  };
-
-  const handleRemoveFile = () => {
-    setAttachedFile(null);
-    setAttachedFilePreview(null);
-  };
-
-  const uploadFile = async (): Promise<string | null> => {
-    if (!attachedFile) return outputUrl || null;
-    setUploadingFile(true);
-    try {
-      const formData = new FormData();
-      formData.append('file', attachedFile);
-      const res = await fetch('/api/upload', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: formData
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
-      return data.url;
-    } catch (err) {
-      setError('File upload failed. Task not saved.');
-      return null;
-    } finally {
-      setUploadingFile(false);
     }
   };
 
@@ -485,6 +535,8 @@ useEffect(() => {
     const deletedTask = tasks.find(t => t.id === id);
     setTasks(prev => prev.filter(t => t.id !== id));
     setTotalLoggedMin(prev => Math.max(0, prev - (deletedTask?.duration_min || 0)));
+
+    if (editingTaskId === id) resetForm();
 
     try {
       const res = await fetch(`/api/tasks/entry/${id}`, {
@@ -574,7 +626,99 @@ useEffect(() => {
   const selectedTaskObj = taskLibrary.find(t => t.task_name === selectedTask);
   const activeCheckpoints = selectedTaskObj?.subtasks || [];
 
-  const isLocked = !['draft', 'rejected'].includes(sheetStatus);
+  // const isLocked = sheetStatus === 'approved';
+
+  const isLocked = false;
+
+  // Split tasks into three groups
+  const draftTasks = tasks.filter((t: any) => !t.submitted);
+  const submittedTasks = tasks.filter((t: any) => t.submitted && sheetStatus !== 'approved');
+  const approvedTasks = tasks.filter((t: any) => t.submitted && sheetStatus === 'approved');
+
+  const renderTaskCard = (t: any, canModify: boolean) => {
+    const brandColor = t.brand === 'GT' ? 'bg-[#C8102E]' : t.brand === 'HH' ? 'bg-[#003189]' : t.brand === 'ACR' ? 'bg-[#1A6B3A]' : 'bg-gray-800';
+    const taskAttachments = (t.output_url || '').split(',').map((u: string) => u.trim()).filter(Boolean);
+    const modifiable = canModify && !isLocked;
+    return (
+      <motion.div
+        key={t.id}
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        className={`p-4 rounded-xl border transition flex justify-between items-start gap-4 ${
+          editingTaskId === t.id ? 'bg-indigo-50 border-indigo-300' : modifiable ? 'bg-gray-50 hover:bg-gray-100 border-gray-200' : 'bg-gray-50/60 border-gray-100'
+        }`}
+      >
+        <div className="space-y-1.5 flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className={`text-[10px] font-bold text-white px-2 py-0.5 rounded ${brandColor}`}>
+              {t.brand}
+            </span>
+            <span className="text-xs font-semibold text-gray-500 font-mono flex items-center gap-0.5">
+              <Clock className="h-3 w-3" /> {t.duration_min} min ({(t.duration_min/60).toFixed(1)}h)
+            </span>
+            <span className={`text-[10px] font-semibold px-2 py-0.5 rounded ${
+              t.status === 'done' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+              : t.status === 'in_progress' ? 'bg-blue-50 text-blue-700 border border-blue-200'
+              : t.status === 'blocked' ? 'bg-red-50 text-red-700 border border-red-200'
+              : t.status === 'pending_review' ? 'bg-purple-50 text-purple-700 border border-purple-200'
+              : 'bg-gray-100 text-gray-700'
+            }`}>
+              {statusReverseMap[t.status] || t.status}
+            </span>
+            {editingTaskId === t.id && (
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-indigo-100 text-indigo-700 border border-indigo-300">Editing...</span>
+            )}
+          </div>
+          <h4 className="text-sm font-semibold text-gray-900">{t.task}</h4>
+          <p className="text-xs text-gray-600 italic">Checkpoints: {t.subtask}</p>
+          {t.notes && <p className="text-xs text-gray-500 font-sans">{t.notes}</p>}
+
+          {t.linked_kpi_metric_name && (
+            <div className="inline-flex items-center gap-1 bg-purple-50 text-purple-700 text-[10px] font-semibold px-2 py-0.5 rounded border border-purple-200 mt-1">
+              🎯 KPI: {t.linked_kpi_metric_name}
+            </div>
+          )}
+
+          {taskAttachments.length > 0 && (
+            <div className="flex flex-wrap gap-2 pt-1">
+              {taskAttachments.map((url: string, i: number) => (
+                url.startsWith('/uploads/') && url.match(/\.(jpg|jpeg|png|gif|webp)$/i) ? (
+                  <a key={i} href={url} target="_blank" rel="noopener noreferrer">
+                    <img src={url} alt="attachment" className="h-14 w-20 object-cover rounded-lg border border-gray-200 hover:opacity-80 transition" />
+                  </a>
+                ) : (
+                  <a key={i} href={url} target="_blank" rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-[11px] font-medium text-indigo-600 hover:underline">
+                    {url.startsWith('/uploads/') ? <Paperclip className="h-3 w-3" /> : <ExternalLink className="h-3 w-3" />}
+                    {url.startsWith('/uploads/') ? `Attachment ${i + 1}` : 'Live Link'}
+                  </a>
+                )
+              ))}
+            </div>
+          )}
+        </div>
+
+        {modifiable && (
+          <div className="flex flex-col gap-1 shrink-0">
+            <button
+              onClick={() => handleEditTaskClick(t)}
+              className="p-1.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition"
+              title="Edit task"
+            >
+              <Pencil className="h-4 w-4" />
+            </button>
+            <button
+              onClick={() => handleDeleteTask(t.id)}
+              className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition"
+              title="Delete task"
+            >
+              <Trash2 className="h-4 w-4" />
+            </button>
+          </div>
+        )}
+      </motion.div>
+    );
+  };
 
   return (
     <div id="timesheet_log_container" className="space-y-6">
@@ -739,10 +883,16 @@ useEffect(() => {
 
             {isLocked ? (
               <div className="p-4 bg-gray-50 border border-gray-100 rounded-xl text-center text-gray-500 text-sm">
-                🔒 Timesheet day is in <strong>{sheetStatus}</strong> state. Add/edit is disabled.
+                🔒 Timesheet is <strong>approved and locked</strong>. No further changes allowed.
               </div>
             ) : (
               <div className="space-y-4">
+                {sheetStatus === 'submitted' && (
+                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800 flex items-start gap-2">
+                    <span>⏱️</span>
+                    <span><strong>Awaiting approval</strong> — You can still add more tasks. Adding a new task will reset this timesheet to draft and require re-submission.</span>
+                  </div>
+                )}
                 {sheetStatus === 'rejected' && approverComment && (
                   <div id="rejected_comment_banner" className="p-4 bg-red-50 text-red-800 text-xs rounded-xl border border-red-200">
                     <p className="font-bold">❌ Revision Required by Approver:</p>
@@ -838,7 +988,27 @@ useEffect(() => {
                     </select>
                   </div>
 
-                  
+                  {/* Interactive Checkpoints */}
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Checkpoints Checklist</label>
+                    <div className="p-3 bg-gray-50 border border-gray-200 rounded-xl max-h-36 overflow-y-auto space-y-2">
+                      {activeCheckpoints.map((cp: string, idx: number) => (
+                        <label key={idx} className="flex items-start gap-2 cursor-pointer text-xs text-gray-700 hover:text-gray-900">
+                          <input
+                            type="checkbox"
+                            checked={!!checkpoints[cp]}
+                            onChange={() => handleToggleCheckpoint(cp)}
+                            className="mt-0.5 rounded text-indigo-600 focus:ring-indigo-500"
+                          />
+                          <span>{cp}</span>
+                        </label>
+                      ))}
+                      {activeCheckpoints.length === 0 && (
+                        <p className="text-gray-400 italic text-center text-xs">No template mapped for this selection.</p>
+                      )}
+                    </div>
+                  </div>
+
                   {/* Subtask Details */}
                   <div>
                     <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">Subtask / Action description</label>
@@ -854,7 +1024,8 @@ useEffect(() => {
 
                   {/* Duration */}
                   <div>
-                    <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">Duration spent</label>
+                    <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">Duration Spent</label>
+                    <p className="text-[10px] text-gray-400 mb-1.5">Pick a quick option below, or enter an exact custom duration</p>
                     <div className="flex gap-1.5 mb-2 overflow-x-auto pb-1">
                       {durationChips.map(chip => (
                         <button
@@ -871,6 +1042,7 @@ useEffect(() => {
                         </button>
                       ))}
                     </div>
+                    <label className="block text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1">Or enter custom duration (minutes)</label>
                     <div className="flex items-center gap-2">
                       <input
                         type="number"
@@ -880,7 +1052,9 @@ useEffect(() => {
                         onChange={(e) => setDurationMin(Number(e.target.value))}
                         className="w-24 px-3 py-1.5 bg-gray-50 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none font-semibold text-center"
                       />
-                      <span className="text-xs text-gray-500">Minutes ({(durationMin/60).toFixed(1)} hrs)</span>
+                      <span className="text-xs text-gray-500">
+                        Allowed range: 5–480 minutes &nbsp;({(durationMin/60).toFixed(1)} hrs)
+                      </span>
                     </div>
                   </div>
 
@@ -905,16 +1079,58 @@ useEffect(() => {
                     </div>
                   </div>
 
-                  {/* Attachment Upload */}
+                  {/* Attachments */}
                   <div>
                     <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">
-                      Work Attachment <span className="text-gray-400 font-normal normal-case">(screenshot, PDF, video — max 10MB)</span>
+                      Work Attachments <span className="text-gray-400 font-normal normal-case">(screenshots, PDF, video — up to 5 files, 10MB each)</span>
                     </label>
 
-                    {!attachedFile ? (
+                    {/* Existing attachments (when editing) */}
+                    {existingAttachmentUrls.length > 0 && (
+                      <div className="flex flex-wrap gap-2 mb-2">
+                        {existingAttachmentUrls.map((url, i) => (
+                          <div key={i} className="relative">
+                            {url.match(/\.(jpg|jpeg|png|gif|webp)$/i) ? (
+                              <img src={url} alt="existing" className="h-14 w-20 object-cover rounded-lg border border-gray-200" />
+                            ) : (
+                              <div className="h-14 w-20 bg-gray-100 rounded-lg flex items-center justify-center border border-gray-200">
+                                <Paperclip className="h-4 w-4 text-gray-400" />
+                              </div>
+                            )}
+                            <button type="button" onClick={() => handleRemoveExistingUrl(i)}
+                              className="absolute -top-1.5 -right-1.5 bg-red-500 text-white rounded-full p-0.5 hover:bg-red-600 transition">
+                              <X className="h-3 w-3" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Newly selected files */}
+                    {attachedFiles.length > 0 && (
+                      <div className="flex flex-wrap gap-2 mb-2">
+                        {attachedFiles.map((file, i) => (
+                          <div key={i} className="relative">
+                            {attachedPreviews[i] ? (
+                              <img src={attachedPreviews[i]!} alt="preview" className="h-14 w-20 object-cover rounded-lg border border-indigo-200" />
+                            ) : (
+                              <div className="h-14 w-20 bg-indigo-50 rounded-lg flex items-center justify-center border border-indigo-200">
+                                <Paperclip className="h-4 w-4 text-indigo-400" />
+                              </div>
+                            )}
+                            <button type="button" onClick={() => handleRemoveNewFile(i)}
+                              className="absolute -top-1.5 -right-1.5 bg-red-500 text-white rounded-full p-0.5 hover:bg-red-600 transition">
+                              <X className="h-3 w-3" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {(existingAttachmentUrls.length + attachedFiles.length) < 5 && (
                       <label className="flex items-center gap-2 w-full px-3 py-2.5 bg-gray-50 border border-dashed border-gray-300 rounded-xl text-sm text-gray-500 cursor-pointer hover:border-indigo-400 hover:bg-indigo-50 transition">
                         <Paperclip className="h-4 w-4 text-gray-400" />
-                        <span>Click to attach a file</span>
+                        <span>Click to attach {attachedFiles.length + existingAttachmentUrls.length > 0 ? 'another' : 'a'} file</span>
                         <input
                           type="file"
                           accept="image/*,application/pdf,video/mp4"
@@ -922,26 +1138,9 @@ useEffect(() => {
                           className="hidden"
                         />
                       </label>
-                    ) : (
-                      <div className="flex items-center gap-3 p-2.5 bg-indigo-50 border border-indigo-200 rounded-xl">
-                        {attachedFilePreview ? (
-                          <img src={attachedFilePreview} alt="preview" className="h-12 w-12 object-cover rounded-lg border border-indigo-200 shrink-0" />
-                        ) : (
-                          <div className="h-12 w-12 bg-indigo-100 rounded-lg flex items-center justify-center shrink-0">
-                            <Paperclip className="h-5 w-5 text-indigo-500" />
-                          </div>
-                        )}
-                        <div className="flex-1 min-w-0">
-                          <p className="text-xs font-semibold text-gray-800 truncate">{attachedFile.name}</p>
-                          <p className="text-[10px] text-gray-400">{(attachedFile.size / 1024).toFixed(0)} KB</p>
-                        </div>
-                        <button type="button" onClick={handleRemoveFile} className="p-1 text-gray-400 hover:text-red-500 transition shrink-0">
-                          <X className="h-4 w-4" />
-                        </button>
-                      </div>
                     )}
 
-                    {/* Keep URL fallback */}
+                    {/* External URL fallback */}
                     <input
                       type="url"
                       value={outputUrl}
@@ -963,13 +1162,24 @@ useEffect(() => {
                     />
                   </div>
 
-                  <button
-                    type="submit"
-                    disabled={loading || uploadingFile}
-                    className="w-full py-2.5 rounded-xl text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 flex items-center justify-center gap-1 transition shadow-sm disabled:opacity-50"
-                  >
-                    {uploadingFile ? 'Uploading file...' : loading ? 'Logging...' : <><Plus className="h-4 w-4" /> Log Task</>}
-                  </button>
+                  <div className="flex gap-2">
+                    {editingTaskId && (
+                      <button
+                        type="button"
+                        onClick={handleCancelEdit}
+                        className="px-4 py-2.5 rounded-xl text-sm font-semibold text-gray-600 bg-gray-100 hover:bg-gray-200 transition"
+                      >
+                        Cancel
+                      </button>
+                    )}
+                    <button
+                      type="submit"
+                      disabled={loading || uploadingFile}
+                      className="flex-1 py-2.5 rounded-xl text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 flex items-center justify-center gap-1 transition shadow-sm disabled:opacity-50"
+                    >
+                      {uploadingFile ? 'Uploading file...' : loading ? (editingTaskId ? 'Updating...' : 'Logging...') : editingTaskId ? (<><Pencil className="h-4 w-4" /> Update Task</>) : (<><Plus className="h-4 w-4" /> Log Task</>)}
+                    </button>
+                  </div>
                 </form>
               </div>
             )}
@@ -990,126 +1200,99 @@ useEffect(() => {
               </div>
             </div>
 
-            {/* List of logged entries */}
-            <div className="space-y-4">
-              {tasks.length === 0 ? (
-                <div className="p-8 text-center bg-gray-50 border border-dashed border-gray-200 rounded-2xl">
-                  <Clock className="h-8 w-8 text-gray-300 mx-auto mb-2" />
-                  <p className="text-sm font-medium text-gray-500">No tasks logged on this date yet.</p>
-                  <p className="text-xs text-gray-400 mt-1">Populate using the Left Form or "Copy Yesterday".</p>
-                </div>
-              ) : (
-                tasks.map(t => {
-                  const brandColor = t.brand === 'GT' ? 'bg-[#C8102E]' : t.brand === 'HH' ? 'bg-[#003189]' : t.brand === 'ACR' ? 'bg-[#1A6B3A]' : 'bg-gray-800';
-                  return (
-                    <motion.div
-                      key={t.id}
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      className="p-4 bg-gray-50 hover:bg-gray-100 rounded-xl border border-gray-200 transition flex justify-between items-start gap-4"
-                    >
-                      <div className="space-y-1.5 flex-1 min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className={`text-[10px] font-bold text-white px-2 py-0.5 rounded ${brandColor}`}>
-                            {t.brand}
-                          </span>
-                          <span className="text-xs font-semibold text-gray-500 font-mono flex items-center gap-0.5">
-                            <Clock className="h-3 w-3" /> {t.duration_min} min ({(t.duration_min/60).toFixed(1)}h)
-                          </span>
-                          <span className={`text-[10px] font-semibold px-2 py-0.5 rounded ${
-                            t.status === 'done' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                            : t.status === 'in_progress' ? 'bg-blue-50 text-blue-700 border border-blue-200'
-                            : t.status === 'blocked' ? 'bg-red-50 text-red-700 border border-red-200'
-                            : t.status === 'pending_review' ? 'bg-purple-50 text-purple-700 border border-purple-200'
-                            : 'bg-gray-100 text-gray-700'
-                          }`}>
-                            {statusReverseMap[t.status] || t.status}
-                          </span>
-                        </div>
-                        <h4 className="text-sm font-semibold text-gray-900">{t.task}</h4>
-                        <p className="text-xs text-gray-600 italic">Checkpoints: {t.subtask}</p>
-                        {t.notes && <p className="text-xs text-gray-500 font-sans">{t.notes}</p>}
-                        
-                        {t.linked_kpi_metric_name && (
-                          <div className="inline-flex items-center gap-1 bg-purple-50 text-purple-700 text-[10px] font-semibold px-2 py-0.5 rounded border border-purple-200 mt-1">
-                            🎯 KPI: {t.linked_kpi_metric_name}
-                          </div>
-                        )}
-
-                        {t.output_url && (
-                          <div className="pt-1">
-                            {t.output_url.startsWith('/uploads/') ? (
-                              // Local uploaded file
-                              t.output_url.match(/\.(jpg|jpeg|png|gif|webp)$/i) ? (
-                                <a href={t.output_url} target="_blank" rel="noopener noreferrer">
-                                  <img src={t.output_url} alt="attachment" className="mt-1 h-16 w-24 object-cover rounded-lg border border-gray-200 hover:opacity-80 transition" />
-                                </a>
-                              ) : (
-                                <a
-                                  href={t.output_url}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="inline-flex items-center gap-1 text-[11px] font-medium text-indigo-600 hover:underline"
-                                >
-                                  <Paperclip className="h-3 w-3" /> View Attachment
-                                </a>
-                              )
-                            ) : (
-                              <a
-                                href={t.output_url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="inline-flex items-center gap-1 text-[11px] font-medium text-indigo-600 hover:underline"
-                              >
-                                <ExternalLink className="h-3 w-3" /> Live Link
-                              </a>
-                            )}
-                          </div>
-                        )}
-                      </div>
-
-                      {!isLocked && (
-                        <button
-                          onClick={() => handleDeleteTask(t.id)}
-                          className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition shrink-0"
-                          title="Delete task"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </button>
-                      )}
-                    </motion.div>
-                  );
-                })
-              )}
-            </div>
-
-            {/* 4. Timesheet submission gate */}
-            {tasks.length > 0 && (
-              <div className="mt-8 pt-6 border-t border-gray-100 flex flex-col md:flex-row justify-between items-center gap-4 bg-indigo-50/50 p-4 rounded-xl border border-indigo-100">
-                <div className="text-center md:text-left">
-                  <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Timesheet Submission</span>
-                  <div className="flex items-center gap-2 mt-1 justify-center md:justify-start">
-                    {sheetStatus === 'draft' && <span className="text-sm font-bold text-gray-700">Draft timesheet ready</span>}
-                    {sheetStatus === 'submitted' && <span className="text-sm font-bold text-amber-700 flex items-center gap-1">⏱️ Awaiting Admin Approval</span>}
-                    {sheetStatus === 'approved' && <span className="text-sm font-bold text-emerald-800 flex items-center gap-1">🟢 Approved & Locked</span>}
-                    {sheetStatus === 'rejected' && <span className="text-sm font-bold text-red-700 flex items-center gap-1">❌ Rejected - Revision Required</span>}
-                  </div>
-                  {sheetStatus === 'draft' && hasGap && (
-                    <p className="text-xs text-amber-600 mt-1">⚠️ You still have unaccounted hours compared to shift clock.</p>
-                  )}
-                </div>
-
-                {sheetStatus === 'draft' && (
-                  <button
-                    id="submit_timesheet_btn"
-                    onClick={handleSubmitTimesheet}
-                    disabled={loading}
-                    className="py-2 px-6 rounded-xl text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 shadow transition w-full md:w-auto disabled:opacity-50"
-                  >
-                    {loading ? 'Submitting...' : 'Submit Timesheet'}
-                  </button>
-                )}
+            {/* ── SECTION 1: Task Log Summary (Draft tasks — editable) ── */}
+            {tasks.length === 0 ? (
+              <div className="p-8 text-center bg-gray-50 border border-dashed border-gray-200 rounded-2xl">
+                <Clock className="h-8 w-8 text-gray-300 mx-auto mb-2" />
+                <p className="text-sm font-medium text-gray-500">No tasks logged on this date yet.</p>
+                <p className="text-xs text-gray-400 mt-1">Use the form on the left to log your first task.</p>
               </div>
+            ) : (
+              <>
+                {draftTasks.length > 0 ? (
+                  <div className="space-y-3">
+                    {draftTasks.map((t: any) => renderTaskCard(t, true))}
+                  </div>
+                ) : !isLocked && (
+                  <div className="p-4 text-center bg-gray-50/60 border border-dashed border-gray-200 rounded-xl">
+                    <p className="text-xs text-gray-400">All tasks submitted. Add a new task above to log more hours.</p>
+                  </div>
+                )}
+
+                {/* ── Submit Timesheet button ── */}
+                {!isLocked && (
+                  <div className="mt-5 pt-5 border-t border-gray-100 flex flex-col md:flex-row justify-between items-center gap-3 bg-indigo-50/50 p-4 rounded-xl border border-indigo-100">
+                    <div className="text-center md:text-left">
+                      <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Timesheet Submission</span>
+                      <div className="flex items-center gap-2 mt-1 justify-center md:justify-start">
+                        {sheetStatus === 'draft' && <span className="text-sm font-bold text-gray-700">Draft ready — submit when done</span>}
+                        {sheetStatus === 'submitted' && <span className="text-sm font-bold text-amber-700 flex items-center gap-1">⏱️ Awaiting Admin Approval</span>}
+                        {sheetStatus === 'rejected' && <span className="text-sm font-bold text-red-700 flex items-center gap-1">❌ Rejected — revise and resubmit</span>}
+                      </div>
+                      {sheetStatus === 'draft' && hasGap && (
+                        <p className="text-xs text-amber-600 mt-1">⚠️ You have unaccounted hours vs shift clock.</p>
+                      )}
+                    </div>
+                    {draftTasks.length > 0 && (
+                      <button
+                        id="submit_timesheet_btn"
+                        onClick={handleSubmitTimesheet}
+                        disabled={loading}
+                        className="py-2 px-6 rounded-xl text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 shadow transition w-full md:w-auto disabled:opacity-50"
+                      >
+                        {loading ? 'Submitting...' : 'Submit Timesheet'}
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {isLocked && (
+                  <div className="mt-5 pt-5 border-t border-gray-100 p-4 bg-emerald-50 rounded-xl border border-emerald-100 text-center">
+                    <span className="text-sm font-bold text-emerald-800">🟢 Approved & Locked</span>
+                  </div>
+                )}
+
+                {/* ── SECTION 2: Tasks Submitted for Review (locked, collapsible) ── */}
+                {submittedTasks.length > 0 && (
+                  <div className="mt-6 space-y-3">
+                    <button
+                      onClick={() => setShowSubmitted(s => !s)}
+                      className="w-full flex items-center justify-between text-[11px] font-bold text-amber-700 uppercase tracking-wider pt-2 border-t-2 border-amber-100 hover:text-amber-900 transition pb-1"
+                    >
+                      <span className="flex items-center gap-1.5">
+                        🔒 Tasks Submitted for Review ({submittedTasks.length})
+                      </span>
+                      <span className="text-amber-400 text-xs">{showSubmitted ? '▲ Collapse' : '▼ Expand'}</span>
+                    </button>
+                    {showSubmitted && (
+                      <div className="space-y-3">
+                        {submittedTasks.map((t: any) => renderTaskCard(t, false))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* ── SECTION 3: Approved Tasks (collapsed by default) ── */}
+                {approvedTasks.length > 0 && (
+                  <div className="mt-6 space-y-3">
+                    <button
+                      onClick={() => setShowApproved(s => !s)}
+                      className="w-full flex items-center justify-between text-[11px] font-bold text-emerald-700 uppercase tracking-wider pt-2 border-t-2 border-emerald-100 hover:text-emerald-900 transition pb-1"
+                    >
+                      <span className="flex items-center gap-1.5">
+                        ✅ Approved Today ({approvedTasks.length})
+                      </span>
+                      <span className="text-emerald-400 text-xs">{showApproved ? '▲ Collapse' : '▼ Expand'}</span>
+                    </button>
+                    {showApproved && (
+                      <div className="space-y-3">
+                        {approvedTasks.map((t: any) => renderTaskCard(t, false))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+              </>
             )}
           </div>
         </div>

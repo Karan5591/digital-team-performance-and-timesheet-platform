@@ -258,15 +258,7 @@ export default function Login({ onLoginSuccess }: LoginProps) {
               {loading ? 'Authenticating...' : 'Sign In'}
             </button>
 
-            <div className="mt-4 p-4 bg-blue-50 text-blue-800 text-xs rounded-xl border border-blue-100">
-              <p className="font-semibold mb-1">💡 Demo Accounts available:</p>
-              <ul className="list-disc pl-4 space-y-1">
-                <li>Admin: <strong>an.digi@thesachdevgroup.com</strong> / pass: <strong>admin123</strong></li>
-                <li>Sr. DMM / GT Lead: <strong>alka@thesachdevgroup.com</strong> / pass: <strong>alka123</strong></li>
-                <li>PPC Manager / HH: <strong>ravi@thesachdevgroup.com</strong> / pass: <strong>ravi123</strong></li>
-              </ul>
-              <p className="mt-2 text-gray-500 italic">First login prompts a password update.</p>
-            </div>
+            
           </form>
         )}
 
