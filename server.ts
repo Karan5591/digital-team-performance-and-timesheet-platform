@@ -701,31 +701,10 @@ app.post('/api/tasks/entry', authenticateToken, async (req, res) => {
       }
     });
   } else {
-    /*if (sheet.status === 'APPROVED') {
+    if (sheet.status === 'APPROVED') {
       res.status(400).json({ error: 'Timesheet for this day is already approved and locked' });
       return;
-    }*/
-
-// ======================check if condition again===================
-
-if (sheet.status === 'APPROVED') {
-    sheet = await prisma.timesheetDay.update({
-        where: { id: sheet.id },
-        data: {
-            status: 'DRAFT',
-            submittedAt: null,
-            approvedAt: null,
-            approverId: null,
-            approverComment: null
-        }
-    });
-}
-
-// ====================end if condition=========================
-
-
-
-
+    }
     // If submitted, reset back to DRAFT so new task can be added
     const dayTasks = await prisma.taskEntry.findMany({ where: { userId: user.id, date: new Date(targetDate) } }) as Array<{ durationMinutes: number }>;
     const newTotal = dayTasks.reduce((sum, t) => sum + t.durationMinutes, 0) + Number(duration_min);
@@ -951,7 +930,8 @@ app.get('/api/timesheet/approval-queue', authenticateToken, requireAdmin, async 
   const submittedSheets = await prisma.timesheetDay.findMany({ where: { status: 'SUBMITTED' } });
   const details = await Promise.all(submittedSheets.map(async sheet => {
     const user = await prisma.user.findUnique({ where: { id: sheet.userId } });
-    const dayTasks = await prisma.taskEntry.findMany({ where: { userId: sheet.userId, date: sheet.date } });
+    // Only show tasks that were actually submitted — not draft tasks added after a rejection
+    const dayTasks = await prisma.taskEntry.findMany({ where: { userId: sheet.userId, date: sheet.date, submitted: true } });
     return {
       ...mapTimesheetDay(sheet),
       user_name: user?.name || 'Unknown User',
@@ -1017,7 +997,7 @@ async function changeTimesheetStatus(sheetId: string, action: 'approve' | 'rejec
     }
   }
 
-const updated = await prisma.timesheetDay.update({
+  const updated = await prisma.timesheetDay.update({
     where: { id: sheetId },
     data: {
       status: newStatus,
@@ -1025,7 +1005,7 @@ const updated = await prisma.timesheetDay.update({
       approverComment: comment || undefined,
       approvedAt: action === 'approve' ? new Date() : sheet.approvedAt
     }
-  }); 
+  });
 
   await prisma.notification.create({
     data: {
@@ -1616,8 +1596,6 @@ app.post('/api/ai/report', authenticateToken, async (req, res) => {
   }
 });
 
-async function startServer() {
-  await loadTaskLibrary();
 // ── File Upload Endpoint ─────────────────────────────────────────────────────
 
 app.post('/api/upload', authenticateToken, upload.single('file'), (req, res) => {
@@ -1636,6 +1614,76 @@ app.post('/api/upload/multi', authenticateToken, upload.array('files', 5), (req,
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ── Report Download Endpoints ────────────────────────────────────────────────
+
+app.get('/api/admin/reports/panel', authenticateToken, requireAdmin, async (req, res) => {
+  const { from, to, userId, brand, status } = req.query as Record<string, string>;
+  if (!from || !to) { res.status(400).json({ error: 'from and to dates are required' }); return; }
+
+  const where: any = {
+    date: { gte: new Date(from), lte: new Date(to) }
+  };
+  if (userId) where.userId = userId;
+  if (brand && brand !== 'All') where.brand = brand;
+
+  const entries = await prisma.taskEntry.findMany({
+    where,
+    include: { user: true },
+    orderBy: [{ date: 'desc' }, { user: { name: 'asc' } }]
+  });
+
+  // Group by userId + date
+  const grouped: Record<string, any> = {};
+  for (const e of entries) {
+    const key = `${e.userId}_${e.date.toISOString().split('T')[0]}`;
+    if (!grouped[key]) {
+      // Get timesheet status for this user+date
+      const sheet = await prisma.timesheetDay.findFirst({
+        where: { userId: e.userId, date: e.date }
+      });
+      grouped[key] = {
+        user_id: e.userId,
+        emp_code: e.user.empCode.toUpperCase(),
+        name: e.user.name,
+        designation: e.user.designation,
+        date: e.date.toISOString().split('T')[0],
+        sheet_status: sheet?.status?.toLowerCase() ?? 'draft',
+        approver_comment: sheet?.approverComment ?? null,
+        total_minutes: 0,
+        tasks: []
+      };
+    }
+    grouped[key].total_minutes += e.durationMinutes;
+    grouped[key].tasks.push({
+      id: e.id,
+      task: e.task,
+      subtask: e.subTask,
+      brand: e.brand,
+      duration_min: e.durationMinutes,
+      status: e.status,
+      submitted: e.submitted,
+      notes: e.notes,
+      output_url: e.outputUrl
+    });
+  }
+
+  let results = Object.values(grouped);
+
+  // Filter by sheet status if requested
+  if (status && status !== 'all') {
+    results = results.filter((r: any) => r.sheet_status === status);
+  }
+
+  res.json(results);
+});
+
+app.get('/api/admin/reports/members', authenticateToken, requireAdmin, async (req, res) => {
+  const members = await prisma.user.findMany({
+    where: { role: { name: 'member' }, status: 'ACTIVE' },
+    orderBy: { name: 'asc' },
+    select: { id: true, name: true, empCode: true, designation: true }
+  });
+  res.json(members.map(m => ({ ...m, empCode: m.empCode.toUpperCase() })));
+});
 
 app.get('/api/admin/reports/attendance', authenticateToken, requireAdmin, async (req, res) => {
   const { from, to } = req.query as { from: string; to: string };
@@ -1691,6 +1739,9 @@ app.get('/api/admin/reports/timesheet', authenticateToken, requireAdmin, async (
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+
+async function startServer() {
+  await loadTaskLibrary();
 
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({ server: { middlewareMode: true }, appType: 'spa' });

@@ -25,9 +25,10 @@ interface TimesheetLogProps {
   token: string;
   user: any;
   onStatusChange?: () => void;
+  onLogout?: () => void;
 }
 
-export default function TimesheetLog({ token, user, onStatusChange }: TimesheetLogProps) {
+export default function TimesheetLog({ token, user, onStatusChange, onLogout }: TimesheetLogProps) {
   const todayStr = new Date().toISOString().split('T')[0];
   const [selectedDate, setSelectedDate] = useState(todayStr);
 
@@ -295,6 +296,7 @@ useEffect(() => {
       setClockedIn(false);
       setAttendanceLog(data.log);
       if (onStatusChange) onStatusChange();
+      setTimeout(() => onLogout?.(), 1500)
     } catch (err: any) {
       setError(err.message);
     } finally {

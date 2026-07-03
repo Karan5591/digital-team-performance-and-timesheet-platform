@@ -16,10 +16,8 @@ import {
   LogOut, 
   Menu, 
   X,
-  Bell,
-  Sparkles,
-  Award,
-  Table
+  Table,
+  BarChart2
 } from 'lucide-react';
 
 import Login from './components/Login';
@@ -31,6 +29,7 @@ import TeamUsers from './components/TeamUsers';
 import IncentiveViewer from './components/IncentiveViewer';
 import AIQueryAssistant from './components/AIQueryAssistant';
 import MasterArchitect from './components/MasterArchitect';
+import Reports from './components/Reports';
 import { clearStoredSession, restoreSessionFromStorage } from './lib/authSession';
 
 export default function App() {
@@ -107,6 +106,7 @@ export default function App() {
       title: 'Admin Controls',
       items: [
         { id: 'team', label: 'Team Registry', icon: Users, role: 'admin' },
+        { id: 'reports', label: 'Reports', icon: BarChart2, role: 'admin' },
       ],
     },
   ];
@@ -168,7 +168,6 @@ export default function App() {
           ))}
         </nav>
 
-        
       </aside>
 
       {/* MOBILE HEADER BAR */}
@@ -181,37 +180,28 @@ export default function App() {
             <Menu className="h-5 w-5" />
           </button>
 
-          
-
           <div className="flex items-center gap-4">
+            
+            {/* Shift Tracker clock-in alert */}
+            <div className="flex items-center gap-2 px-3 py-1 bg-gray-50 rounded-full border border-gray-200 text-xs">
+              <span className={`h-2.5 w-2.5 rounded-full ${clockedIn ? 'bg-emerald-500 animate-pulse' : 'bg-gray-300'}`}></span>
+              <span className="font-semibold text-gray-600">{clockedIn ? 'Clocked In' : 'Shift Closed'}</span>
+            </div>
 
-  <div className="flex items-center gap-2 px-3 py-1 bg-gray-50 rounded-full border border-gray-200 text-xs">
-    <span
-      className={`h-2.5 w-2.5 rounded-full ${
-        clockedIn ? 'bg-emerald-500 animate-pulse' : 'bg-gray-300'
-      }`}
-    />
-    <span className="font-semibold text-gray-600">
-      {clockedIn ? 'Clocked In' : 'Shift Closed'}
-    </span>
-  </div>
+            {/* Profile initial logo */}
+            <div className="h-8 w-8 bg-indigo-100 rounded-lg flex items-center justify-center font-bold text-indigo-700 text-xs">
+              {user.name.charAt(0)}
+            </div>
 
-  <div className="flex items-center gap-4">
+            <button
+              onClick={handleLogout}
+              className="flex items-center gap-1 text-sm font-medium text-gray-600 hover:text-red-600 transition-colors"
+            >
+              <LogOut className="h-4 w-4" />
+              Sign Out
+            </button>
 
-  <div className="h-9 w-9 bg-indigo-100 rounded-lg flex items-center justify-center font-bold text-indigo-700 text-sm">
-    {user.name.charAt(0)}
-  </div>
-
-  <button
-    onClick={handleLogout}
-    className="flex items-center gap-1 text-sm font-medium text-gray-600 hover:text-red-600 transition-colors"
-  >
-    <LogOut className="h-4 w-4" />
-    Sign Out
-  </button>
-
-</div>
-</div>
+          </div>
         </header>
 
         {/* MOBILE NAVIGATION SIDEBAR DRAWER */}
@@ -330,6 +320,7 @@ export default function App() {
                   token={token} 
                   user={user} 
                   onStatusChange={checkShiftStatus} 
+                  onLogout={handleLogout}
                 />
               )}
               {activeTab === 'kpi' && (
@@ -355,6 +346,9 @@ export default function App() {
               )}
               {activeTab === 'team' && user.role === 'admin' && (
                 <TeamUsers token={token} />
+              )}
+              {activeTab === 'reports' && user.role === 'admin' && (
+                <Reports token={token} />
               )}
             </motion.div>
           </AnimatePresence>
