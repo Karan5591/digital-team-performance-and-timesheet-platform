@@ -462,9 +462,9 @@ useEffect(() => {
     const otherTasksTotal = editingTaskId
       ? tasks.filter(t => t.id !== editingTaskId).reduce((sum, t) => sum + t.duration_min, 0)
       : totalLoggedMin;
-    const remainingMin = 480 - otherTasksTotal;
+    const remainingMin = 720 - otherTasksTotal;
     if (durationMin > remainingMin) {
-      setError(`Daily limit is 8 hours. You can only set up to ${remainingMin} minute(s) for this task.`);
+      setError(`Daily limit is 12 hours. You can only set up to ${remainingMin} minute(s) for this task.`);
       return;
     }
     if ((mappedStatus === 'blocked' || mappedStatus === 'pending_review') && !notes.trim()) {
@@ -1048,14 +1048,14 @@ useEffect(() => {
                     <div className="flex items-center gap-2">
                       <input
                         type="number"
-                        min="5"
-                        max="480"
+                        min="2"
+                        max="720"
                         value={durationMin}
                         onChange={(e) => setDurationMin(Number(e.target.value))}
                         className="w-24 px-3 py-1.5 bg-gray-50 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none font-semibold text-center"
                       />
                       <span className="text-xs text-gray-500">
-                        Allowed range: 5–480 minutes &nbsp;({(durationMin/60).toFixed(1)} hrs)
+                        Allowed range: 2–720 minutes &nbsp;({(durationMin/60).toFixed(1)} hrs)
                       </span>
                     </div>
                   </div>
@@ -1198,7 +1198,7 @@ useEffect(() => {
               </div>
               <div className="text-right">
                 <span className="text-xs font-semibold uppercase text-gray-400">Total Logged</span>
-                <p className="text-xl font-bold text-gray-800">{loggedHrs} / 8.0 <span className="text-xs text-gray-400">hrs</span></p>
+                <p className="text-xl font-bold text-gray-800">{loggedHrs} / 12.0 <span className="text-xs text-gray-400">hrs</span></p>
               </div>
             </div>
 

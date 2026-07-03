@@ -662,11 +662,11 @@ app.post('/api/tasks/entry', authenticateToken, async (req, res) => {
 
   const targetDate = (date as string) || new Date().toISOString().split('T')[0];
 
-  // Server-side 8h/day cap check
+  // Server-side 12h/day cap check
   const existingTasks = await prisma.taskEntry.findMany({ where: { userId: user.id, date: new Date(targetDate) } }) as Array<{ durationMinutes: number }>;
   const currentTotal = existingTasks.reduce((sum, t) => sum + t.durationMinutes, 0);
-  if (currentTotal + Number(duration_min) > 480) {
-    res.status(400).json({ error: `Daily limit is 8 hours. You can only log ${480 - currentTotal} more minute(s) today.` });
+  if (currentTotal + Number(duration_min) > 720) {
+    res.status(400).json({ error: `Daily limit is 12 hours. You can only log ${720 - currentTotal} more minute(s) today.` });
     return;
   }
 
@@ -738,11 +738,11 @@ app.put('/api/tasks/entry/:id', authenticateToken, async (req, res) => {
     return;
   }
 
-  // Server-side 8h/day cap check (excluding this task's current duration)
+  // Server-side 12h/day cap check (excluding this task's current duration)
   const dayTasks = await prisma.taskEntry.findMany({ where: { userId: user.id, date: existing.date } }) as Array<{ id: string; durationMinutes: number }>;
   const otherTotal = dayTasks.filter(t => t.id !== id).reduce((sum, t) => sum + t.durationMinutes, 0);
-  if (otherTotal + Number(duration_min) > 480) {
-    res.status(400).json({ error: `Daily limit is 8 hours. You can only set up to ${480 - otherTotal} minute(s) for this task.` });
+  if (otherTotal + Number(duration_min) > 720) {
+    res.status(400).json({ error: `Daily limit is 12 hours. You can only set up to ${720 - otherTotal} minute(s) for this task.` });
     return;
   }
 
