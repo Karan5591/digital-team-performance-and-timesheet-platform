@@ -256,19 +256,6 @@
     "category": "General"
   },
   {
-    "id": "lib_used_car",
-    "role": "Used Car Ops",
-    "task_name": "Used Car Operations Tasks",
-    "subtasks": [
-      "Lead closure audit & CRM flags verification",
-      "Hpromise & UTrust listings published check",
-      "Website inventory count audit",
-      "Listing accuracy & vehicle photography review",
-      "Zoho Inventory stock aging tracking"
-    ],
-    "category": "General"
-  },
-  {
     "id": "lib_intern",
     "role": "Intern",
     "task_name": "Intern Tasks",
@@ -277,6 +264,29 @@
       "Assigned learning course module study",
       "Supporting team SPOCs in data pulling",
       "GMB post proofreading help"
+    ],
+    "category": "General"
+  },
+  {
+    "id": "lib_used_car",
+    "role": "Used Car Ops",
+    "task_name": "Used Car Operations Tasks",
+    "subtasks": [
+      "Lead closure audit & CRM flags verification",
+      "Hpromise & UTrust listings published check",
+      "Website inventory count audit",
+      "Listing accuracy & vehicle photography review",
+      "Zoho Inventory stock aging tracking",
+      "GT-UTrust Used Car Leads (Update)",
+"HH-HPromise Used Car Leads (Update)",
+"Used Car Lead→Enquiry Conv %",
+"Leads Shared with Sales Team Same-Day",
+"UTrust + HPromise Site Uptime",
+"Used Car Listings Published (Update)",
+"Listing Accuracy (price/specs/photos)",
+"Zoho Inventory Stock Updated (Update)",
+"Inventory Accuracy (system vs actual)",
+"Stock Aging Report Submitted (Update)"
     ],
     "category": "General"
   }
