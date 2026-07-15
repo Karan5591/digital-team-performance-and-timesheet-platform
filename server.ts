@@ -116,7 +116,9 @@ function mapTaskEntry(entry: any): TaskEntry {
     output_url: entry.outputUrl || null,
     linked_kpi_metric_id: entry.linkedKpiMetricId || null,
     linked_kpi_metric_name: entry.linkedKpiMetricName || null,
-    submitted: entry.submitted ?? false
+    submitted: entry.submitted ?? false,
+    approver_comment: entry.approverComment || null,
+    approved_at: entry.approvedAt ? new Date(entry.approvedAt).toISOString() : null
   };
 }
 
@@ -961,6 +963,13 @@ app.get('/api/admin/timesheets', authenticateToken, requireAdmin, async (req, re
   res.json(details);
 });
 
+function deriveTimesheetStatusFromTasks(tasks: Array<{ status?: string | null }>) {
+  const normalized = (tasks || []).map(task => (task.status || 'pending').toLowerCase());
+  if (normalized.some(status => status === 'rejected')) return 'REJECTED';
+  if (normalized.length > 0 && normalized.every(status => status === 'approved')) return 'APPROVED';
+  return 'SUBMITTED';
+}
+
 async function changeTimesheetStatus(sheetId: string, action: 'approve' | 'reject', admin: User, comment?: string) {
   const sheet = await prisma.timesheetDay.findUnique({ where: { id: sheetId } });
   if (!sheet) return null;
@@ -1046,6 +1055,71 @@ app.post('/api/timesheet/reject', authenticateToken, requireAdmin, async (req, r
     return;
   }
   res.json({ success: true, sheet: mapTimesheetDay(updated) });
+});
+
+app.post('/api/admin/task/decision', authenticateToken, requireAdmin, async (req, res) => {
+  const admin = (req as any).user as User;
+  const { taskId, action, comment } = req.body;
+
+  if (!taskId || !action) {
+    res.status(400).json({ error: 'taskId and action are required' });
+    return;
+  }
+
+  const task = await prisma.taskEntry.findUnique({ where: { id: taskId } });
+  if (!task) {
+    res.status(404).json({ error: 'Task not found' });
+    return;
+  }
+
+  if (action === 'reject' && !comment?.trim()) {
+    res.status(400).json({ error: 'Rejection reason is required' });
+    return;
+  }
+
+  const nextStatus = action === 'approve' ? 'approved' : 'rejected';
+  const updatedTask = await prisma.taskEntry.update({
+    where: { id: taskId },
+    data: {
+      status: nextStatus,
+      approverId: admin.id,
+      approverComment: comment?.trim() || null,
+      approvedAt: new Date()
+    }
+  });
+
+  const relatedSheet = await prisma.timesheetDay.findFirst({
+    where: { userId: task.userId, date: task.date }
+  });
+
+  if (relatedSheet) {
+    const relatedTasks = await prisma.taskEntry.findMany({
+      where: { userId: task.userId, date: task.date }
+    });
+    const sheetStatus = deriveTimesheetStatusFromTasks(relatedTasks);
+    await prisma.timesheetDay.update({
+      where: { id: relatedSheet.id },
+      data: {
+        status: sheetStatus as any,
+        approverId: admin.id,
+        approverComment: comment?.trim() || relatedSheet.approverComment || undefined,
+        approvedAt: sheetStatus === 'APPROVED' || sheetStatus === 'REJECTED' ? new Date() : relatedSheet.approvedAt
+      }
+    });
+  }
+
+  if (action === 'reject') {
+    await prisma.notification.create({
+      data: {
+        userId: task.userId,
+        type: 'timesheet_rejected',
+        message: `Your task "${task.task}" was rejected${comment ? `: ${comment}` : ''}`,
+        read: false
+      }
+    });
+  }
+
+  res.json({ success: true, task: mapTaskEntry(updatedTask) });
 });
 
 app.post('/api/admin/timesheet/approve', authenticateToken, requireAdmin, async (req, res) => {

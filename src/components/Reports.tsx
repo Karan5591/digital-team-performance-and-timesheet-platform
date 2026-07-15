@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, type ReactElement } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   Search,
@@ -34,7 +34,18 @@ const statusColors: Record<string, string> = {
   rejected: 'bg-red-50 text-red-700 border border-red-200',
 };
 
-const statusIcons: Record<string, JSX.Element> = {
+const taskStatusColors: Record<string, string> = {
+  approved: 'bg-emerald-50 text-emerald-700',
+  rejected: 'bg-red-50 text-red-700',
+  done: 'bg-emerald-50 text-emerald-700',
+  in_progress: 'bg-blue-50 text-blue-700',
+  blocked: 'bg-red-50 text-red-700',
+  pending_review: 'bg-amber-50 text-amber-700',
+  not_started: 'bg-gray-100 text-gray-600',
+  pending: 'bg-gray-100 text-gray-600',
+};
+
+const statusIcons: Record<string, ReactElement> = {
   approved: <CheckCircle2 className="h-3.5 w-3.5" />,
   submitted: <AlertCircle className="h-3.5 w-3.5" />,
   draft: <FileText className="h-3.5 w-3.5" />,
@@ -63,6 +74,7 @@ export default function Reports({ token }: ReportsProps) {
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const [downloading, setDownloading] = useState<string | null>(null);
   const [searched, setSearched] = useState(false);
+  const [taskActionState, setTaskActionState] = useState<Record<string, { comment: string; loading: boolean }>>({});
 
   // Fetch member list on mount
   useEffect(() => {
@@ -126,6 +138,54 @@ export default function Reports({ token }: ReportsProps) {
   };
 
   const totalHours = results.reduce((sum, r) => sum + (r.total_minutes || 0), 0);
+
+  const deriveSheetStatus = (tasks: any[]) => {
+    const normalized = (tasks || []).map((task: any) => (task.status || 'pending').toLowerCase());
+    if (normalized.some(status => status === 'rejected')) return 'rejected';
+    if (normalized.length > 0 && normalized.every(status => status === 'approved')) return 'approved';
+    return 'submitted';
+  };
+
+  const updateTaskInResults = (taskId: string, nextStatus: string, comment?: string) => {
+    setResults(prev => prev.map((row: any) => {
+      if (!row.tasks.some((task: any) => task.id === taskId)) return row;
+      const updatedTasks = row.tasks.map((task: any) => task.id === taskId ? {
+        ...task,
+        status: nextStatus,
+        approver_comment: comment ?? task.approver_comment ?? null
+      } : task);
+      return {
+        ...row,
+        tasks: updatedTasks,
+        sheet_status: deriveSheetStatus(updatedTasks)
+      };
+    }));
+  };
+
+  const handleTaskDecision = async (taskId: string, action: 'approve' | 'reject') => {
+    const current = taskActionState[taskId] || { comment: '', loading: false };
+    if (action === 'reject' && !current.comment.trim()) {
+      alert('Please provide a rejection reason before rejecting.');
+      return;
+    }
+
+    setTaskActionState(prev => ({ ...prev, [taskId]: { ...prev[taskId], loading: true } }));
+
+    try {
+      const res = await fetch('/api/admin/task/decision', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ taskId, action, comment: current.comment.trim() })
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || 'Failed to update task');
+      updateTaskInResults(taskId, action === 'approve' ? 'approved' : 'rejected', action === 'reject' ? current.comment.trim() : undefined);
+    } catch (err: any) {
+      alert(err.message || 'Failed to update task');
+    } finally {
+      setTaskActionState(prev => ({ ...prev, [taskId]: { comment: prev[taskId]?.comment || '', loading: false } }));
+    }
+  };
 
   return (
     <div className="space-y-6 font-sans">
@@ -374,42 +434,73 @@ export default function Reports({ token }: ReportsProps) {
                               </div>
                               {row.tasks.map((t: any, i: number) => {
                                 const attachments = (t.output_url || '').split(',').map((u: string) => u.trim()).filter(Boolean);
+                                const taskState = taskActionState[t.id] || { comment: '', loading: false };
+                                const isDecisionMade = t.status === 'approved' || t.status === 'rejected';
                                 return (
-                                  <div key={t.id || i} className="grid grid-cols-12 gap-2 bg-white border border-gray-100 rounded-xl px-3 py-2.5 text-xs items-start">
-                                    <div className="col-span-1">
-                                      <span className={`text-[9px] font-bold text-white px-1.5 py-0.5 rounded ${brandColor[t.brand] || 'bg-gray-600'}`}>
-                                        {t.brand}
-                                      </span>
+                                  <div key={t.id || i} className="bg-white border border-gray-100 rounded-xl px-3 py-2.5 text-xs">
+                                    <div className="grid grid-cols-12 gap-2 items-start">
+                                      <div className="col-span-1">
+                                        <span className={`text-[9px] font-bold text-white px-1.5 py-0.5 rounded ${brandColor[t.brand] || 'bg-gray-600'}`}>
+                                          {t.brand}
+                                        </span>
+                                      </div>
+                                      <div className="col-span-3 font-semibold text-gray-800">{t.task}</div>
+                                      <div className="col-span-3 text-gray-500 italic text-[11px]">{t.subtask || '—'}</div>
+                                      <div className="col-span-1 font-mono text-gray-600">{(t.duration_min / 60).toFixed(1)}h</div>
+                                      <div className="col-span-2">
+                                        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${taskStatusColors[t.status] || 'bg-gray-100 text-gray-600'}`}>
+                                          {t.status}
+                                        </span>
+                                      </div>
+                                      <div className="col-span-2 flex flex-wrap gap-1">
+                                        {attachments.length === 0 ? (
+                                          <span className="text-[10px] text-gray-300">—</span>
+                                        ) : attachments.map((url: string, ai: number) => (
+                                          url.match(/\.(jpg|jpeg|png|gif|webp)$/i) ? (
+                                            <a key={ai} href={url} target="_blank" rel="noopener noreferrer">
+                                              <img src={url} alt="attachment" className="h-8 w-10 object-cover rounded border border-gray-200 hover:opacity-80 transition" />
+                                            </a>
+                                          ) : (
+                                            <a key={ai} href={url} target="_blank" rel="noopener noreferrer"
+                                              className="inline-flex items-center gap-0.5 text-[10px] text-indigo-600 hover:underline">
+                                              {url.startsWith('/uploads/') ? <Paperclip className="h-3 w-3" /> : <ExternalLink className="h-3 w-3" />}
+                                              {url.startsWith('/uploads/') ? `File ${ai + 1}` : 'Link'}
+                                            </a>
+                                          )
+                                        ))}
+                                      </div>
                                     </div>
-                                    <div className="col-span-3 font-semibold text-gray-800">{t.task}</div>
-                                    <div className="col-span-3 text-gray-500 italic text-[11px]">{t.subtask || '—'}</div>
-                                    <div className="col-span-1 font-mono text-gray-600">{(t.duration_min / 60).toFixed(1)}h</div>
-                                    <div className="col-span-2">
-                                      <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
-                                        t.status === 'done' ? 'bg-emerald-50 text-emerald-700'
-                                        : t.status === 'in_progress' ? 'bg-blue-50 text-blue-700'
-                                        : t.status === 'blocked' ? 'bg-red-50 text-red-700'
-                                        : 'bg-gray-100 text-gray-600'
-                                      }`}>
-                                        {t.status}
-                                      </span>
-                                    </div>
-                                    <div className="col-span-2 flex flex-wrap gap-1">
-                                      {attachments.length === 0 ? (
-                                        <span className="text-[10px] text-gray-300">—</span>
-                                      ) : attachments.map((url: string, ai: number) => (
-                                        url.match(/\.(jpg|jpeg|png|gif|webp)$/i) ? (
-                                          <a key={ai} href={url} target="_blank" rel="noopener noreferrer">
-                                            <img src={url} alt="attachment" className="h-8 w-10 object-cover rounded border border-gray-200 hover:opacity-80 transition" />
-                                          </a>
-                                        ) : (
-                                          <a key={ai} href={url} target="_blank" rel="noopener noreferrer"
-                                            className="inline-flex items-center gap-0.5 text-[10px] text-indigo-600 hover:underline">
-                                            {url.startsWith('/uploads/') ? <Paperclip className="h-3 w-3" /> : <ExternalLink className="h-3 w-3" />}
-                                            {url.startsWith('/uploads/') ? `File ${ai + 1}` : 'Link'}
-                                          </a>
-                                        )
-                                      ))}
+                                    <div className="mt-3 flex flex-col gap-2 border-t border-gray-100 pt-2">
+                                      {t.approver_comment && (t.status === 'rejected' || t.status === 'approved') && (
+                                        <div className="text-[10px] text-gray-600 bg-gray-50 rounded-lg px-2 py-1.5">
+                                          <span className="font-semibold">Decision note:</span> {t.approver_comment}
+                                        </div>
+                                      )}
+                                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                                        <input
+                                          value={taskState.comment}
+                                          onChange={(e) => setTaskActionState(prev => ({ ...prev, [t.id]: { ...prev[t.id], comment: e.target.value } }))}
+                                          placeholder="Rejection reason"
+                                          className="flex-1 border border-gray-200 rounded-lg px-2.5 py-1.5 text-[11px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                                          disabled={taskState.loading || isDecisionMade}
+                                        />
+                                        <div className="flex gap-2">
+                                          <button
+                                            onClick={() => handleTaskDecision(t.id, 'approve')}
+                                            disabled={taskState.loading || isDecisionMade}
+                                            className="flex items-center gap-1 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-[11px] font-semibold text-emerald-700 disabled:opacity-50"
+                                          >
+                                            <CheckCircle2 className="h-3.5 w-3.5" /> Approve
+                                          </button>
+                                          <button
+                                            onClick={() => handleTaskDecision(t.id, 'reject')}
+                                            disabled={taskState.loading || isDecisionMade}
+                                            className="flex items-center gap-1 rounded-lg border border-red-200 bg-red-50 px-2.5 py-1.5 text-[11px] font-semibold text-red-700 disabled:opacity-50"
+                                          >
+                                            <XCircle className="h-3.5 w-3.5" /> Reject
+                                          </button>
+                                        </div>
+                                      </div>
                                     </div>
                                   </div>
                                 );

@@ -487,11 +487,11 @@ export default function Dashboard({ token, user, onNavigateToTab }: DashboardPro
 
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
 
-            <div className="lg:col-span-2 bg-white p-6 rounded-2xl border border-gray-100 shadow-sm">
+            <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm flex flex-col h-full">
               <h3 className="text-base font-bold font-display text-gray-900 mb-4">Assigned Tasks & Deadlines</h3>
-              <div className="space-y-3">
+              <div className="space-y-3 flex-1">
                 {memberMetrics.deadlines && memberMetrics.deadlines.length > 0 ? (
                   memberMetrics.deadlines.map((dl: any, idx: number) => (
                     <div key={idx} className="p-3.5 bg-gray-50 border border-gray-200 rounded-xl text-xs flex justify-between items-center">
@@ -510,11 +510,11 @@ export default function Dashboard({ token, user, onNavigateToTab }: DashboardPro
               </div>
             </div>
 
-            <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm">
+            <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm flex flex-col h-full">
               <h3 className="text-base font-bold font-display text-gray-900 mb-4 flex items-center gap-1.5">
                 <Bell className="h-4 w-4 text-indigo-500" /> Notifications
               </h3>
-              <div className="space-y-3">
+              <div className="space-y-3 flex-1 overflow-auto">
                 {notifications.length === 0 ? (
                   <p className="text-xs text-gray-400 italic text-center py-4">No new alerts.</p>
                 ) : (

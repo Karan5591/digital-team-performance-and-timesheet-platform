@@ -38,11 +38,13 @@ export interface TaskEntry {
   task: string; subtask: string;
   brand: 'GT' | 'HH' | 'ACR' | 'Internal' | 'All';
   duration_min: number;
-  status: 'not_started' | 'in_progress' | 'done' | 'blocked' | 'pending_review';
+  status: 'not_started' | 'in_progress' | 'done' | 'blocked' | 'pending_review' | 'approved' | 'rejected';
   notes: string; output_url: string | null;
   linked_kpi_metric_id: string | null;
   linked_kpi_metric_name: string | null;
   submitted: boolean;
+  approver_comment?: string | null;
+  approved_at?: string | null;
 }
 
 export interface TimesheetDay {

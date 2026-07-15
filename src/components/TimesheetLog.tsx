@@ -42,7 +42,7 @@ export default function TimesheetLog({ token, user, onStatusChange, onLogout }: 
   // Form states for new task entry
   const [selectedTask, setSelectedTask] = useState('');
   const [selectedSubtask, setSelectedSubtask] = useState('');
-  const [selectedBrand, setSelectedBrand] = useState<'GT' | 'HH' | 'ACR' | 'Internal' | 'All'>('GT');
+  const [selectedBrand, setSelectedBrand] = useState<'GT' | 'HH' | 'ACR' | 'All'>('GT');
   const [durationMin, setDurationMin] = useState(30);
   const [status, setStatus] = useState<'Not started' | 'In progress' | 'Done' | 'Blocked' | 'Pending Review'>('Done');
   const [notes, setNotes] = useState('');
@@ -895,13 +895,6 @@ useEffect(() => {
                     <span><strong>Awaiting approval</strong> — You can still add more tasks. Adding a new task will reset this timesheet to draft and require re-submission.</span>
                   </div>
                 )}
-                {sheetStatus === 'rejected' && approverComment && (
-                  <div id="rejected_comment_banner" className="p-4 bg-red-50 text-red-800 text-xs rounded-xl border border-red-200">
-                    <p className="font-bold">❌ Revision Required by Approver:</p>
-                    <p className="mt-1 italic">"{approverComment}"</p>
-                  </div>
-                )}
-
                 {/* Quick Add Section */}
                 {recentTasks.length > 0 && (
                   <div className="p-3 bg-indigo-50/40 rounded-xl border border-indigo-100/50">
@@ -938,7 +931,7 @@ useEffect(() => {
                   <div>
                     <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">Brand focus</label>
                     <div className="grid grid-cols-4 gap-1.5">
-                      {(['GT', 'HH', 'ACR', 'Internal'] as const).map(brand => (
+                      {(['GT', 'HH', 'ACR', 'All'] as const).map(brand => (
                         <button
                           key={brand}
                           type="button"
@@ -1229,7 +1222,6 @@ useEffect(() => {
                       <div className="flex items-center gap-2 mt-1 justify-center md:justify-start">
                         {sheetStatus === 'draft' && <span className="text-sm font-bold text-gray-700">Draft ready — submit when done</span>}
                         {sheetStatus === 'submitted' && <span className="text-sm font-bold text-amber-700 flex items-center gap-1">⏱️ Awaiting Admin Approval</span>}
-                        {sheetStatus === 'rejected' && <span className="text-sm font-bold text-red-700 flex items-center gap-1">❌ Rejected — revise and resubmit</span>}
                       </div>
                       {sheetStatus === 'draft' && hasGap && (
                         <p className="text-xs text-amber-600 mt-1">⚠️ You have unaccounted hours vs shift clock.</p>
