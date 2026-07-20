@@ -117,6 +117,7 @@ function mapTaskEntry(entry: any): TaskEntry {
     linked_kpi_metric_id: entry.linkedKpiMetricId || null,
     linked_kpi_metric_name: entry.linkedKpiMetricName || null,
     submitted: entry.submitted ?? false,
+    admin_assigned: entry.adminAssigned ?? false,
     approver_comment: entry.approverComment || null,
     approved_at: entry.approvedAt ? new Date(entry.approvedAt).toISOString() : null
   };
@@ -638,18 +639,22 @@ app.get('/api/tasks/library', authenticateToken, async (req, res) => {
 
 app.get('/api/tasks/list', authenticateToken, async (req, res) => {
   const user = (req as any).user as User;
-  const { date } = req.query;
-  const targetDate = (date as string) || new Date().toISOString().split('T')[0];
+  const { date, from, to } = req.query as { date?: string; from?: string; to?: string };
+  const targetDate = date || new Date().toISOString().split('T')[0];
 
   let targetUserId = user.id;
   if (user.role === 'admin' && req.query.userId) {
     targetUserId = req.query.userId as string;
   }
 
-  const entries = await prisma.taskEntry.findMany({
-    where: { userId: targetUserId, date: new Date(targetDate) }
-  });
+  const where: any = { userId: targetUserId };
+  if (from && to) {
+    where.date = { gte: new Date(from), lte: new Date(to) };
+  } else {
+    where.date = new Date(targetDate);
+  }
 
+  const entries = await prisma.taskEntry.findMany({ where });
   res.json(entries.map(mapTaskEntry));
 });
 
@@ -1122,6 +1127,178 @@ app.post('/api/admin/task/decision', authenticateToken, requireAdmin, async (req
   res.json({ success: true, task: mapTaskEntry(updatedTask) });
 });
 
+app.post('/api/admin/task/assign', authenticateToken, requireAdmin, async (req, res) => {
+  const { userId, date, task, subtask, brand, duration_min, notes } = req.body;
+  if (!userId || !date || !task || !brand || !duration_min) {
+    res.status(400).json({ error: 'userId, date, task, brand, and duration_min are required' });
+    return;
+  }
+
+  const assignee = await prisma.user.findUnique({ where: { id: userId } });
+  if (!assignee || assignee.status !== 'ACTIVE') {
+    res.status(404).json({ error: 'Assigned user not found or inactive' });
+    return;
+  }
+
+  const assignmentDate = new Date(date);
+  const existingTasks = await prisma.taskEntry.findMany({ where: { userId, date: assignmentDate } }) as Array<{ durationMinutes: number }>;
+  const totalMin = existingTasks.reduce((sum, t) => sum + t.durationMinutes, 0) + Number(duration_min);
+
+  const sheet = await prisma.timesheetDay.findFirst({ where: { userId, date: assignmentDate } });
+  if (sheet && sheet.status === 'APPROVED') {
+    res.status(400).json({ error: 'Timesheet is already approved for the selected date' });
+    return;
+  }
+
+  if (sheet) {
+    await prisma.timesheetDay.update({
+      where: { id: sheet.id },
+      data: { totalLoggedMinutes: totalMin, status: 'DRAFT' }
+    });
+  } else {
+    await prisma.timesheetDay.create({
+      data: {
+        userId,
+        date: assignmentDate,
+        totalLoggedMinutes: totalMin,
+        status: 'DRAFT'
+      }
+    });
+  }
+
+  const newTask = await prisma.taskEntry.create({
+    data: {
+      userId,
+      date: assignmentDate,
+      task,
+      subTask: subtask || '',
+      brand,
+      durationMinutes: Number(duration_min),
+      status: 'pending',
+      notes: notes || '',
+      submitted: false,
+      adminAssigned: true
+    }
+  });
+
+  const eventTitle = `Assigned Task: ${task}${subtask ? ` — ${subtask}` : ''}`;
+  await prisma.calendarEvent.create({
+    data: {
+      userId,
+      date: assignmentDate,
+      type: 'deadline',
+      title: eventTitle,
+      status: 'pending'
+    }
+  });
+
+  await prisma.notification.create({
+    data: {
+      userId,
+      type: 'calendar_assignment',
+      message: `A new assigned task has been scheduled for ${date}: "${task}"`,
+      read: false
+    }
+  });
+
+  res.json({ success: true, task: mapTaskEntry(newTask), message: 'Task assigned and deadline created.' });
+});
+
+app.get('/api/admin/tasks/assigned', authenticateToken, requireAdmin, async (req, res) => {
+  const tasks = await prisma.taskEntry.findMany({
+    orderBy: { createdAt: 'desc' },
+    include: { user: true } as any,
+    take: 50
+  }) as any[];
+
+  const assignedTasks = tasks.filter((task: any) => task.adminAssigned);
+
+  res.json(assignedTasks.map(task => ({
+    ...mapTaskEntry(task),
+    user_name: task.user?.name || 'Unknown',
+    user_emp_code: task.user?.empCode || ''
+  })));
+});
+
+app.patch('/api/tasks/status/:id', authenticateToken, async (req, res) => {
+  const user = (req as any).user as User;
+  const { id } = req.params;
+  const { status } = req.body;
+
+  const allowed = ['pending', 'in_progress', 'done'];
+  if (!status || !allowed.includes(status)) {
+    res.status(400).json({ error: 'Invalid status. Allowed values: pending, in_progress, done' });
+    return;
+  }
+
+  const task = await prisma.taskEntry.findUnique({ where: { id } });
+  if (!task || task.userId !== user.id) {
+    res.status(404).json({ error: 'Task not found or not authorized' });
+    return;
+  }
+
+  const updatedTask = await prisma.taskEntry.update({
+    where: { id },
+    data: { status }
+  });
+
+  res.json({ success: true, task: mapTaskEntry(updatedTask) });
+});
+
+// Employee progress on an admin-assigned task: "working" or "done".
+// Kept separate from the generic status route so it never affects the
+// normal "mark done, then submit the whole day" timesheet flow.
+app.patch('/api/tasks/assigned/:id/progress', authenticateToken, async (req, res) => {
+  const user = (req as any).user as User;
+  const { id } = req.params;
+  const { action } = req.body;
+
+  if (!action || !['working', 'done'].includes(action)) {
+    res.status(400).json({ error: "Invalid action. Allowed values: 'working', 'done'" });
+    return;
+  }
+
+  const task = await prisma.taskEntry.findUnique({ where: { id } }) as any;
+  if (!task || task.userId !== user.id) {
+    res.status(404).json({ error: 'Task not found or not authorized' });
+    return;
+  }
+  if (!task.adminAssigned) {
+    res.status(400).json({ error: 'This action is only available for admin-assigned tasks' });
+    return;
+  }
+
+  if (action === 'working') {
+    const updated = await prisma.taskEntry.update({
+      where: { id },
+      data: { status: 'in_progress' }
+    });
+    await notifyAdmin(`${user.name} started working on assigned task: "${task.task}"`, 'assigned_task_working');
+    res.json({ success: true, task: mapTaskEntry(updated) });
+    return;
+  }
+
+  // action === 'done' -> mark done AND submit it into that day's timesheet
+  const updated = await prisma.taskEntry.update({
+    where: { id },
+    data: { status: 'done', submitted: true, submittedAt: new Date() }
+  });
+
+  // The timesheet day is normally created at assignment time; make sure a row
+  // exists so the completed task is reflected in the employee's timesheet.
+  const sheet = await prisma.timesheetDay.findFirst({ where: { userId: user.id, date: task.date } });
+  if (!sheet) {
+    const dayTasks = await prisma.taskEntry.findMany({ where: { userId: user.id, date: task.date } }) as Array<{ durationMinutes: number }>;
+    const totalMin = dayTasks.reduce((sum, t) => sum + t.durationMinutes, 0);
+    await prisma.timesheetDay.create({
+      data: { userId: user.id, date: task.date, totalLoggedMinutes: totalMin, status: 'DRAFT' }
+    });
+  }
+
+  await notifyAdmin(`${user.name} completed assigned task: "${task.task}"`, 'assigned_task_done');
+  res.json({ success: true, task: mapTaskEntry(updated) });
+});
+
 app.post('/api/admin/timesheet/approve', authenticateToken, requireAdmin, async (req, res) => {
   const admin = (req as any).user as User;
   const { sheetId, action, comment } = req.body;
@@ -1445,12 +1622,17 @@ app.get('/api/admin/dashboard', authenticateToken, requireAdmin, async (req, res
     ? Math.round(kpiScoresThisMonth.reduce((sum, s) => sum + s.finalScore, 0) / kpiScoresThisMonth.length)
     : 0;
 
-  const brandMetrics = { GT: { sum: 0, count: 0 }, HH: { sum: 0, count: 0 }, ACR: { sum: 0, count: 0 } };
+  const brandMetrics: Record<'GT' | 'HH' | 'ACR', { sum: number; count: number }> = {
+    GT: { sum: 0, count: 0 },
+    HH: { sum: 0, count: 0 },
+    ACR: { sum: 0, count: 0 }
+  };
   for (const score of kpiScoresThisMonth) {
     const usr = users.find(u => u.id === score.userId);
-    if (usr && usr.brandFocus && brandMetrics[usr.brandFocus]) {
-      brandMetrics[usr.brandFocus].sum += score.finalScore;
-      brandMetrics[usr.brandFocus].count += 1;
+    const brandFocus = usr?.brandFocus as 'GT' | 'HH' | 'ACR' | undefined;
+    if (brandFocus && brandMetrics[brandFocus]) {
+      brandMetrics[brandFocus].sum += score.finalScore;
+      brandMetrics[brandFocus].count += 1;
     }
   }
 
@@ -1527,6 +1709,42 @@ app.get('/api/admin/dashboard', authenticateToken, requireAdmin, async (req, res
   const totalLoggedMinToday = activeList.reduce((sum, item) => sum + item.loggedMin, 0);
   const avgUtilizationPercent = totalActiveMembers > 0 ? Math.round((totalLoggedMinToday / (totalActiveMembers * 480)) * 100) : 0;
 
+  const deadlineWindowEnd = new Date(today);
+  deadlineWindowEnd.setDate(deadlineWindowEnd.getDate() + 7);
+  const urgentDeadlinesRaw = await prisma.calendarEvent.findMany({
+    where: {
+      type: 'deadline',
+      date: { gte: new Date(today), lte: deadlineWindowEnd }
+    },
+    include: { user: true },
+    orderBy: [{ date: 'asc' }],
+    take: 5
+  });
+
+  const assignedTasksRaw = await prisma.taskEntry.findMany({
+    where: {
+      date: { gte: new Date(today), lte: deadlineWindowEnd }
+    },
+    include: { user: true } as any,
+    orderBy: [{ date: 'asc' }],
+    take: 6
+  }) as any[];
+
+  const assignedTasks = assignedTasksRaw.filter((task: any) => task.adminAssigned);
+
+  const upcomingTaskEntries = await prisma.taskEntry.findMany({
+    where: {
+      date: { gte: new Date(today), lte: deadlineWindowEnd }
+    }
+  });
+  const completedTaskCount = upcomingTaskEntries.filter((task) => {
+    const status = (task.status || '').toLowerCase();
+    return status === 'approved' || status === 'done';
+  }).length;
+  const assignedTaskCompletionRate = upcomingTaskEntries.length > 0
+    ? Math.round((completedTaskCount / upcomingTaskEntries.length) * 100)
+    : 0;
+
   res.json({
     activeNow: activeNowList,
     heatmap,
@@ -1537,7 +1755,19 @@ app.get('/api/admin/dashboard', authenticateToken, requireAdmin, async (req, res
     liveClockInStatus,
     approvalQueueCount: submittedSheets.length,
     utilizationHeatmap: { avgUtilizationPercent, activeList },
-    kpiPerformanceAverages: { avgKpiScore: teamAverageKpi || 85 }
+    kpiPerformanceAverages: { avgKpiScore: teamAverageKpi || 85 },
+    urgentDeadlines: urgentDeadlinesRaw.map((e) => ({
+      id: e.id,
+      title: e.title,
+      date: formatDate(e.date),
+      assignee: e.user?.name || 'Broadcast'
+    })),
+    assignedTaskCompletionRate,
+    assignedTasks: assignedTasks.map((task) => ({
+      ...mapTaskEntry(task),
+      user_name: task.user?.name || 'Unknown',
+      user_emp_code: task.user?.empCode || ''
+    }))
   });
 });
 
@@ -1580,6 +1810,16 @@ app.get('/api/member/dashboard', authenticateToken, async (req, res) => {
     take: 3
   });
 
+  const assignedTasks = await prisma.taskEntry.findMany({
+    where: {
+      userId: user.id,
+      adminAssigned: true,
+      date: { gte: new Date(today) }
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 10
+  }) as any[];
+
   let todayStatus = 'Not Checked In';
   if (clockedIn) {
     todayStatus = 'Clocked In';
@@ -1610,6 +1850,7 @@ app.get('/api/member/dashboard', authenticateToken, async (req, res) => {
       gate_status: score.gateStatus
     } : { final_score: 0, gate_status: 'Watch' },
     deadlines: deadlines.map(e => ({ ...e, date: formatDate(e.date) })),
+    assignedTasks: assignedTasks.map(mapTaskEntry),
     todayStatus,
     weeklyHoursLogged,
     kpiSummaryScore

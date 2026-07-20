@@ -17,7 +17,8 @@ import {
   Menu, 
   X,
   Table,
-  BarChart2
+  BarChart2,
+  ClipboardList
 } from 'lucide-react';
 
 import Login from './components/Login';
@@ -30,6 +31,7 @@ import IncentiveViewer from './components/IncentiveViewer';
 import AIQueryAssistant from './components/AIQueryAssistant';
 import MasterArchitect from './components/MasterArchitect';
 import Reports from './components/Reports';
+import AssignTask from './components/AssignTask';
 import { clearStoredSession, restoreSessionFromStorage } from './lib/authSession';
 
 export default function App() {
@@ -105,6 +107,7 @@ export default function App() {
     {
       title: 'Admin Controls',
       items: [
+        { id: 'assign-task', label: 'Assign Task', icon: ClipboardList, role: 'admin' },
         { id: 'team', label: 'Team Registry', icon: Users, role: 'admin' },
         { id: 'reports', label: 'Reports', icon: BarChart2, role: 'admin' },
       ],
@@ -349,6 +352,9 @@ export default function App() {
               )}
               {activeTab === 'reports' && user.role === 'admin' && (
                 <Reports token={token} />
+              )}
+              {activeTab === 'assign-task' && user.role === 'admin' && (
+                <AssignTask token={token} />
               )}
             </motion.div>
           </AnimatePresence>

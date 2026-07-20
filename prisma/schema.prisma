@@ -191,6 +191,8 @@ model TaskEntry {
   submittedAt         DateTime @default(now())
   submitted           Boolean  @default(false)
 
+  adminAssigned       Boolean  @default(false)
+
   linkedKpiMetricId   String?
   linkedKpiMetricName String?
 

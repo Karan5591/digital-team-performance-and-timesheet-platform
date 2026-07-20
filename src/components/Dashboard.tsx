@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { motion } from 'motion/react';
 import {
   Users,
@@ -21,7 +21,9 @@ import {
   Square,
   AlertTriangle,
   ArrowRight,
-  Activity
+  Activity,
+  Volume2,
+  VolumeX
 } from 'lucide-react';
 
 interface DashboardProps {
@@ -38,6 +40,73 @@ export default function Dashboard({ token, user, onNavigateToTab }: DashboardPro
   const [rejectReason, setRejectReason] = useState<{ [key: string]: string }>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
+    try { return localStorage.getItem('notifSound') !== 'off'; } catch { return true; }
+  });
+
+  // Refs to chime exactly once when a brand-new notification arrives (employee side).
+  const seenNotifIdsRef = useRef<Set<string>>(new Set());
+  const notifInitializedRef = useRef(false);
+  const soundEnabledRef = useRef(soundEnabled);
+  const audioCtxRef = useRef<any>(null);
+
+  useEffect(() => { soundEnabledRef.current = soundEnabled; }, [soundEnabled]);
+
+  const toggleSound = () => {
+    setSoundEnabled(prev => {
+      const next = !prev;
+      try { localStorage.setItem('notifSound', next ? 'on' : 'off'); } catch {}
+      return next;
+    });
+  };
+
+  // Short two-tone "ding" generated in-browser, so there's no audio file to host.
+  const playNotificationSound = () => {
+    try {
+      const Ctx = (window as any).AudioContext || (window as any).webkitAudioContext;
+      if (!Ctx) return;
+      if (!audioCtxRef.current) audioCtxRef.current = new Ctx();
+      const ctx = audioCtxRef.current;
+      if (ctx.state === 'suspended') ctx.resume();
+      const now = ctx.currentTime;
+      ([[880, 0], [1174.66, 0.16]] as [number, number][]).forEach(([freq, offset]) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = freq;
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        const t = now + offset;
+        gain.gain.setValueAtTime(0, t);
+        gain.gain.linearRampToValueAtTime(0.25, t + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.28);
+        osc.start(t);
+        osc.stop(t + 0.3);
+      });
+    } catch (e) {
+      console.warn('Notification sound blocked or failed:', e);
+    }
+  };
+
+  // Browsers block audio until the user interacts; prime the context on first gesture.
+  useEffect(() => {
+    const unlock = () => {
+      try {
+        const Ctx = (window as any).AudioContext || (window as any).webkitAudioContext;
+        if (Ctx && !audioCtxRef.current) audioCtxRef.current = new Ctx();
+        if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') audioCtxRef.current.resume();
+      } catch {}
+      window.removeEventListener('pointerdown', unlock);
+      window.removeEventListener('keydown', unlock);
+    };
+    window.addEventListener('pointerdown', unlock);
+    window.addEventListener('keydown', unlock);
+    return () => {
+      window.removeEventListener('pointerdown', unlock);
+      window.removeEventListener('keydown', unlock);
+    };
+  }, []);
 
   const safeParseJson = async (res: Response) => {
     const text = await res.text();
@@ -58,6 +127,12 @@ export default function Dashboard({ token, user, onNavigateToTab }: DashboardPro
       const interval = setInterval(() => {
         fetchDashboardMetrics();
       }, 300000);
+      return () => clearInterval(interval);
+    } else {
+      // Poll so a newly-assigned task chimes without needing a manual refresh.
+      const interval = setInterval(() => {
+        fetchNotifications();
+      }, 20000);
       return () => clearInterval(interval);
     }
   }, []);
@@ -83,7 +158,21 @@ export default function Dashboard({ token, user, onNavigateToTab }: DashboardPro
     try {
       const res = await fetch('/api/notifications', { headers: { Authorization: `Bearer ${token}` } });
       const data = await safeParseJson(res);
-      if (res.ok && Array.isArray(data)) setNotifications(data);
+      if (res.ok && Array.isArray(data)) {
+        // Chime for employees when a genuinely new notification (e.g. a task
+        // assignment) shows up. Seed silently on the first load.
+        if (user.role !== 'admin') {
+          const currentIds: string[] = data.map((n: any) => n.id).filter(Boolean);
+          if (!notifInitializedRef.current) {
+            notifInitializedRef.current = true;
+          } else {
+            const hasNew = currentIds.some(id => !seenNotifIdsRef.current.has(id));
+            if (hasNew && soundEnabledRef.current) playNotificationSound();
+          }
+          currentIds.forEach(id => seenNotifIdsRef.current.add(id));
+        }
+        setNotifications(data);
+      }
     } catch (err) {
       console.error(err);
     }
@@ -163,6 +252,32 @@ export default function Dashboard({ token, user, onNavigateToTab }: DashboardPro
         headers: { Authorization: `Bearer ${token}` }
       });
       setNotifications(prev => prev.filter(n => n.id !== notifId));
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  // Employee marks an assigned task as Working (in_progress) or Done (submitted).
+  const handleAssignedProgress = async (taskId: string, action: 'working' | 'done') => {
+    try {
+      const res = await fetch(`/api/tasks/assigned/${taskId}/progress`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action })
+      });
+      const data = await safeParseJson(res);
+      if (res.ok && data.success) {
+        setMemberMetrics((prev: any) =>
+          prev
+            ? {
+                ...prev,
+                assignedTasks: (prev.assignedTasks || []).map((t: any) =>
+                  t.id === taskId ? { ...t, status: data.task.status, submitted: data.task.submitted } : t
+                )
+              }
+            : prev
+        );
+      }
     } catch (err) {
       console.error(err);
     }
@@ -467,52 +582,151 @@ export default function Dashboard({ token, user, onNavigateToTab }: DashboardPro
             </div>
 
             <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm">
-              <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Monthly KPI Index</span>
-              <div className="mt-4 flex items-center gap-4">
-                <div className="h-12 w-12 rounded-xl bg-emerald-50 flex items-center justify-center text-emerald-700 shrink-0 font-extrabold text-sm">
-                  {memberMetrics.kpiSummaryScore || 0}%
-                </div>
-                <div>
-                  <h4 className="text-sm font-semibold text-gray-900">Weighted KPI Score</h4>
-                  <p className="text-[10px] text-gray-400 mt-0.5">Compiled for current month.</p>
-                </div>
-              </div>
-              <button
-                onClick={() => onNavigateToTab?.('kpi')}
-                className="mt-4 w-full py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1"
-              >
-                View Full Scorecard <ArrowRight className="h-3 w-3" />
-              </button>
+              {(() => {
+                const openTasks = (memberMetrics.assignedTasks || []).filter((t: any) => {
+                  const s = (t.status || 'pending').toLowerCase();
+                  return !(s === 'done' || s === 'approved' || t.submitted);
+                });
+                const sorted = [...openTasks].sort((a: any, b: any) =>
+                  a.date > b.date ? 1 : a.date < b.date ? -1 : 0
+                );
+                const soonest = sorted[0];
+                const count = openTasks.length;
+
+                if (count === 0) {
+                  return (
+                    <>
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Urgent Assigned Tasks</span>
+                      <div className="mt-4 flex items-center gap-4">
+                        <div className="h-12 w-12 rounded-xl bg-emerald-50 flex items-center justify-center text-emerald-600 shrink-0">
+                          <CheckCircle2 className="h-6 w-6" />
+                        </div>
+                        <div>
+                          <h4 className="text-sm font-semibold text-gray-900">All caught up</h4>
+                          <p className="text-[10px] text-gray-400 mt-0.5">No open tasks assigned to you.</p>
+                        </div>
+                      </div>
+                      <div className="mt-4 w-full py-2 bg-emerald-50 text-emerald-700 rounded-xl text-xs font-bold flex items-center justify-center gap-1">
+                        Nothing pending
+                      </div>
+                    </>
+                  );
+                }
+
+                return (
+                  <>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-amber-600">Urgent Assigned Tasks</span>
+                      <span className="text-[10px] font-bold text-white bg-amber-500 rounded-full px-2 py-0.5">{count} open</span>
+                    </div>
+                    <div className="mt-4 flex items-center gap-4">
+                      <div className="h-12 w-12 rounded-xl bg-amber-50 flex items-center justify-center text-amber-600 shrink-0 animate-pulse">
+                        <AlertTriangle className="h-6 w-6" />
+                      </div>
+                      <div className="min-w-0">
+                        <h4 className="text-sm font-semibold text-gray-900 truncate">{soonest.task}</h4>
+                        <p className="text-[10px] text-gray-500 mt-0.5">{soonest.brand} &middot; due {soonest.date}</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => document.getElementById('assigned_tasks_card')?.scrollIntoView({ behavior: 'smooth', block: 'center' })}
+                      className="mt-4 w-full py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1"
+                    >
+                      Review tasks <ArrowRight className="h-3 w-3" />
+                    </button>
+                  </>
+                );
+              })()}
             </div>
 
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
 
-            <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm flex flex-col h-full">
+            <div id="assigned_tasks_card" className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm flex flex-col h-full">
               <h3 className="text-base font-bold font-display text-gray-900 mb-4">Assigned Tasks & Deadlines</h3>
               <div className="space-y-3 flex-1">
-                {memberMetrics.deadlines && memberMetrics.deadlines.length > 0 ? (
-                  memberMetrics.deadlines.map((dl: any, idx: number) => (
-                    <div key={idx} className="p-3.5 bg-gray-50 border border-gray-200 rounded-xl text-xs flex justify-between items-center">
-                      <div>
-                        <p className="font-semibold text-gray-900">{dl.title}</p>
-                        <p className="text-gray-400 font-mono mt-0.5">Due: {dl.date}</p>
+                {/* Admin-assigned tasks with Working / Done controls */}
+                {(memberMetrics.assignedTasks || []).map((t: any) => {
+                  const s = (t.status || 'pending').toLowerCase();
+                  const isDone = s === 'done' || s === 'approved' || t.submitted;
+                  const isWorking = s === 'in_progress';
+                  return (
+                    <div key={t.id} className="p-3.5 bg-indigo-50/40 border border-indigo-100 rounded-xl text-xs">
+                      <div className="flex justify-between items-start gap-2">
+                        <div className="min-w-0">
+                          <p className="font-semibold text-gray-900 truncate">{t.task}</p>
+                          <p className="text-gray-400 font-mono mt-0.5">{t.brand} &middot; due {t.date} &middot; {t.duration_min} min</p>
+                        </div>
+                        {isDone ? (
+                          <span className="shrink-0 text-[10px] bg-emerald-100 text-emerald-700 border border-emerald-200 font-bold uppercase px-2 py-0.5 rounded flex items-center gap-1">
+                            <CheckCircle2 className="h-3 w-3" /> Completed
+                          </span>
+                        ) : isWorking ? (
+                          <span className="shrink-0 text-[10px] bg-blue-100 text-blue-700 border border-blue-200 font-bold uppercase px-2 py-0.5 rounded flex items-center gap-1">
+                            <Activity className="h-3 w-3" /> Working
+                          </span>
+                        ) : (
+                          <span className="shrink-0 text-[10px] bg-amber-100 text-amber-700 border border-amber-200 font-bold uppercase px-2 py-0.5 rounded flex items-center gap-1">
+                            <Clock className="h-3 w-3" /> Pending
+                          </span>
+                        )}
                       </div>
-                      <span className="text-[10px] bg-red-50 text-red-700 border border-red-200 font-bold uppercase px-2 py-0.5 rounded">
-                        Deadline
-                      </span>
+                      {isDone ? (
+                        <div className="mt-2.5 flex items-center gap-1.5 text-[11px] font-bold text-emerald-700">
+                          <CheckCircle2 className="h-3.5 w-3.5" /> Done &middot; submitted to timesheet
+                        </div>
+                      ) : (
+                        <div className="mt-2.5 flex items-center gap-2">
+                          <button
+                            onClick={() => handleAssignedProgress(t.id, 'working')}
+                            className={`flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition ${isWorking ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-blue-700 border-blue-200 hover:bg-blue-50'}`}
+                          >
+                            <Activity className="h-3 w-3" /> {isWorking ? 'Working' : 'Start working'}
+                          </button>
+                          <button
+                            onClick={() => handleAssignedProgress(t.id, 'done')}
+                            className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-bold border bg-white text-emerald-700 border-emerald-200 hover:bg-emerald-50 transition"
+                          >
+                            <Check className="h-3 w-3" /> Done
+                          </button>
+                        </div>
+                      )}
                     </div>
-                  ))
-                ) : (
-                  <p className="text-xs text-gray-400 italic text-center py-4">No critical deadlines assigned.</p>
-                )}
+                  );
+                })}
+
+                {/* Calendar deadlines */}
+                {(memberMetrics.deadlines || []).map((dl: any, idx: number) => (
+                  <div key={`dl-${idx}`} className="p-3.5 bg-gray-50 border border-gray-200 rounded-xl text-xs flex justify-between items-center">
+                    <div>
+                      <p className="font-semibold text-gray-900">{dl.title}</p>
+                      <p className="text-gray-400 font-mono mt-0.5">Due: {dl.date}</p>
+                    </div>
+                    <span className="text-[10px] bg-red-50 text-red-700 border border-red-200 font-bold uppercase px-2 py-0.5 rounded">
+                      Deadline
+                    </span>
+                  </div>
+                ))}
+
+                {(!memberMetrics.assignedTasks || memberMetrics.assignedTasks.length === 0) &&
+                  (!memberMetrics.deadlines || memberMetrics.deadlines.length === 0) && (
+                    <p className="text-xs text-gray-400 italic text-center py-4">No assigned tasks or deadlines.</p>
+                  )}
               </div>
             </div>
 
             <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm flex flex-col h-full">
-              <h3 className="text-base font-bold font-display text-gray-900 mb-4 flex items-center gap-1.5">
-                <Bell className="h-4 w-4 text-indigo-500" /> Notifications
+              <h3 className="text-base font-bold font-display text-gray-900 mb-4 flex items-center justify-between gap-1.5">
+                <span className="flex items-center gap-1.5"><Bell className="h-4 w-4 text-indigo-500" /> Notifications</span>
+                <button
+                  onClick={toggleSound}
+                  title={soundEnabled ? 'Mute assignment sound' : 'Unmute assignment sound'}
+                  aria-label={soundEnabled ? 'Mute assignment sound' : 'Unmute assignment sound'}
+                  className="text-gray-400 hover:text-indigo-600 transition"
+                >
+                  {soundEnabled ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
+                </button>
               </h3>
               <div className="space-y-3 flex-1 overflow-auto">
                 {notifications.length === 0 ? (

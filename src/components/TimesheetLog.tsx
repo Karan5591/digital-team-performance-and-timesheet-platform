@@ -16,6 +16,7 @@ import {
   AlertTriangle, 
   ExternalLink, 
   CheckCircle2,
+  Download,
   Paperclip,
   X,
   Pencil,
@@ -31,6 +32,8 @@ interface TimesheetLogProps {
 export default function TimesheetLog({ token, user, onStatusChange, onLogout }: TimesheetLogProps) {
   const todayStr = new Date().toISOString().split('T')[0];
   const [selectedDate, setSelectedDate] = useState(todayStr);
+  const [downloadFromDate, setDownloadFromDate] = useState(todayStr);
+  const [downloadToDate, setDownloadToDate] = useState(todayStr);
 
   const [clockedIn, setClockedIn] = useState(false);
   const [attendanceLog, setAttendanceLog] = useState<any>(null);
@@ -62,8 +65,10 @@ export default function TimesheetLog({ token, user, onStatusChange, onLogout }: 
   const [checkpoints, setCheckpoints] = useState<{ [key: string]: boolean }>({});
 
   const [loading, setLoading] = useState(false);
+  const [downloadingDownload, setDownloadingDownload] = useState(false);
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
+  const [updatingStatusId, setUpdatingStatusId] = useState<string | null>(null);
 
   // Added States
   const [liveActiveMinutes, setLiveActiveMinutes] = useState(0);
@@ -97,6 +102,31 @@ export default function TimesheetLog({ token, user, onStatusChange, onLogout }: 
     } catch (e) {
       console.warn("Received non-JSON response from server:", text.substring(0, 100));
       return { error: 'Invalid response from server. Please wait or try again.' };
+    }
+  };
+
+  const handleUpdateTaskStatus = async (taskId: string, status: 'pending' | 'in_progress' | 'done') => {
+    setError('');
+    setSuccessMsg('');
+    setUpdatingStatusId(taskId);
+    try {
+      const res = await fetch(`/api/tasks/status/${taskId}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ status })
+      });
+      const data = await safeParseJson(res);
+      if (!res.ok) throw new Error(data.error || 'Unable to update task status');
+      setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status } : t));
+      setSuccessMsg(status === 'done' ? 'Task marked done.' : 'Task marked as working.');
+      if (onStatusChange) onStatusChange();
+    } catch (err: any) {
+      setError(err.message || 'Failed to update task status.');
+    } finally {
+      setUpdatingStatusId(null);
     }
   };
 
@@ -260,6 +290,53 @@ useEffect(() => {
       }
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  const handleDownloadTaskList = async () => {
+    setError('');
+    setSuccessMsg('');
+    setDownloadingDownload(true);
+    try {
+      const params = new URLSearchParams();
+      if (downloadFromDate) params.set('from', downloadFromDate);
+      if (downloadToDate) params.set('to', downloadToDate);
+
+      const res = await fetch(`/api/tasks/list?${params.toString()}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await safeParseJson(res);
+      if (!res.ok || !Array.isArray(data)) {
+        throw new Error(data?.error || 'Unable to fetch tasks for download');
+      }
+
+      const XLSX = await import('xlsx');
+      const rows = data.map((task: any) => ({
+        Date: task.date,
+        Task: task.task,
+        'Sub Task': task.subtask,
+        Brand: task.brand,
+        'Duration (min)': task.duration_min,
+        Status: task.status,
+        Submitted: task.submitted ? 'Yes' : 'No',
+        Notes: task.notes || '',
+        'Output URL': task.output_url || '',
+        'Linked KPI Metric': task.linked_kpi_metric_name || ''
+      }));
+
+      const ws = XLSX.utils.json_to_sheet(rows);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Task List');
+      const filename = downloadFromDate === downloadToDate
+        ? `tasklist_${downloadFromDate}.xlsx`
+        : `tasklist_${downloadFromDate}_to_${downloadToDate}.xlsx`;
+      XLSX.writeFile(wb, filename);
+      setSuccessMsg('Your task list has been downloaded successfully.');
+    } catch (err: any) {
+      console.error(err);
+      setError(err.message || 'Download failed. Please try again.');
+    } finally {
+      setDownloadingDownload(false);
     }
   };
 
@@ -698,6 +775,7 @@ useEffect(() => {
               ))}
             </div>
           )}
+          {renderTaskActions(t)}
         </div>
 
         {modifiable && (
@@ -722,6 +800,41 @@ useEffect(() => {
     );
   };
 
+  const renderTaskActions = (t: any) => {
+    if (!t.admin_assigned || isLocked) return null;
+    const isWorking = t.status === 'in_progress';
+    const isDone = t.status === 'done';
+
+    return (
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {!isDone && (
+          <button
+            type="button"
+            disabled={updatingStatusId === t.id}
+            onClick={() => handleUpdateTaskStatus(t.id, isWorking ? 'done' : 'in_progress')}
+            className={`px-3 py-2 rounded-xl text-xs font-semibold transition ${
+              isWorking
+                ? 'bg-emerald-600 text-white hover:bg-emerald-700'
+                : 'bg-amber-100 text-amber-800 hover:bg-amber-200'
+            } ${updatingStatusId === t.id ? 'opacity-60 cursor-not-allowed' : ''}`}
+          >
+            {updatingStatusId === t.id ? 'Updating...' : isWorking ? 'Mark Done' : 'Start Working'}
+          </button>
+        )}
+        {isDone && (
+          <span className="px-3 py-2 rounded-xl text-xs font-semibold bg-emerald-100 text-emerald-700 border border-emerald-200">
+            Completed
+          </span>
+        )}
+        {!isDone && (
+          <span className="px-3 py-2 rounded-xl text-xs text-slate-600 bg-slate-100 border border-slate-200">
+            Assigned task progress can be updated here.
+          </span>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div id="timesheet_log_container" className="space-y-6">
       
@@ -731,15 +844,44 @@ useEffect(() => {
           <h1 className="text-2xl font-bold font-display tracking-tight text-gray-900">Daily Attendance & Timesheet</h1>
           <p className="text-sm text-gray-500 mt-1">Clock in your work shift and account for your 8-hour target.</p>
         </div>
-        <div className="flex items-center gap-3">
-          <label className="text-sm font-medium text-gray-600">Select Date:</label>
-          <input 
-            type="date"
-            max={todayStr}
-            value={selectedDate}
-            onChange={(e) => setSelectedDate(e.target.value)}
-            className="px-3 py-1.5 bg-gray-50 border border-gray-300 rounded-xl text-sm font-medium focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-          />
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+            
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="flex items-center gap-2">
+                <label className="text-sm font-medium text-gray-600">From</label>
+                <input
+                  type="date"
+                  max={todayStr}
+                  value={downloadFromDate}
+                  onChange={(e) => setDownloadFromDate(e.target.value)}
+                  className="px-3 py-1.5 bg-gray-50 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <label className="text-sm font-medium text-gray-600">To</label>
+                <input
+                  type="date"
+                  max={todayStr}
+                  value={downloadToDate}
+                  onChange={(e) => setDownloadToDate(e.target.value)}
+                  className="px-3 py-1.5 bg-gray-50 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                />
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleDownloadTaskList}
+            disabled={downloadingDownload}
+            className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 transition"
+          >
+            {downloadingDownload ? (
+              <span className="inline-flex items-center gap-2"><span className="h-3.5 w-3.5 rounded-full border-2 border-white border-t-transparent animate-spin" /> Downloading...</span>
+            ) : (
+              <><Download className="h-4 w-4" /> Download Tasklist</>
+            )}
+          </button>
         </div>
       </div>
 
